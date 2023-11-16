@@ -25,6 +25,12 @@ class AISFormer(nn.Module):
         self.conv = nn.Conv2d(in_channels=in_chans, out_channels=in_chans, kernel_size=(1,1), stride=1)
         self.encoder = Encoder(img_size=self.roi_out_size*2, in_chans=3, num_heads=3)
         self.decoder = Decoder(img_size=self.roi_out_size*2, in_chans=3, num_heads=3)
+        self.mlp = nn.ModuleList([
+            nn.Linear(in_features=2*in_chans, out_features=in_chans),
+            nn.Linear(in_chans, in_chans),
+            nn.Linear(in_chans, in_chans)
+        ])
+        self.unflatten = nn.Unflatten(2, (self.roi_out_size*2, self.roi_out_size*2))
 
         
     def forward(self, imgs):
@@ -41,12 +47,16 @@ class AISFormer(nn.Module):
 
         f_roi = self.roi_align(imgs, rois) # [K, C, H_r, W_r]
         f_roi = self.conv(self.deconv(f_roi)) # [K, C, H_m, W_m]
-        f_e = self.encoder(f_roi) # [B, H_m*W_m, C]
-        Q = self.decoder(f_e) # [B, C, 3]
-        # I_i = self.mlp(Q[:,1], Q[:,2]) # [B, C]
-        # roi_embed = self.unflatten(f_roi.flatten() + f_e) # [B, C, H_m, W_m]
-        # masks = torch.dot(roi_embed, torch.cat(Q, I_i))
-        return x, f_roi, f_e
+        f_e = self.encoder(f_roi) # [K, H_m*W_m, C]
+        Q = self.decoder(f_e) # [C, 3]
+        Q_vis_am = torch.cat((Q[:,1], Q[:,2]), dim=0)
+        I_i = Q_vis_am
+        for m in self.mlp:
+            I_i = m(I_i) # [C]
+        I_i = I_i.unsqueeze(-1)
+        roi_embed = self.unflatten(f_roi.flatten(2) + f_e.permute(0,2,1)) # [K, C, H_m, W_m]
+        masks = torch.tensordot(roi_embed, torch.cat((Q, I_i), dim=1), dims=([1], [0])).permute(0,3,1,2)
+        return x, f_roi, f_e, Q, I_i, roi_embed, masks
 
 
 
@@ -89,7 +99,7 @@ class Decoder(nn.Module):
     """
         Transformer decoder with one block of self-attention and one block of cross-attention.
     """
-    def __init__(self, img_size, K, in_chans, num_heads):
+    def __init__(self, img_size, in_chans, num_heads):
         super().__init__()
 
         self.Q = nn.Parameter(torch.ones((in_chans, 3)).unsqueeze(0))
@@ -104,14 +114,18 @@ class Decoder(nn.Module):
         self.ffn_cross2 = nn.Linear(in_chans, in_chans)
 
     def forward(self, x):
-        attn_Q = self.Q + self.attention(self.Q)
+        K, D, N = x.shape
+        Q = self.Q.repeat(K, 1, 1)
+        attn_Q = self.Q + self.attention(Q)
         attn_Q = self.ffn_self(self.norm_self(attn_Q))
 
-        Q = self.Q + attn_Q
+        Q = Q + attn_Q
 
         Q = Q + self.cross_attention(x, Q)
         Q = self.ffn_cross1(self.norm_cross1(Q))
         Q = Q + self.ffn_cross2(self.norm_cross2(Q))
+
+        Q = Q[0, :, :].squeeze(0)
 
         return Q
 
@@ -135,17 +149,15 @@ if __name__ == "__main__":
     aisformer = AISFormer(img_size=h)
 
     
-    x, f_roi, f_e = aisformer(imgs)
+    x, f_roi, f_e, Q, I, roi_embed, masks = aisformer(imgs)
     # print(x)
     print(imgs.shape)
     print(f_roi.shape)
     print(f_e.shape)
-    
-    # testdec = Decoder(img_size=h, K=5, in_chans=3, num_heads=1)
-
-    # x = torch.ones((5, 2500,3))
-
-    # testdec(x)
+    print(Q.shape)
+    print(I.shape)
+    print(roi_embed.shape)
+    print(masks)
 
 
     

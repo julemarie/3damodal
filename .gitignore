@@ -1,6 +1,8 @@
 mmdetection/
 mmdetection3d/
 cocoapi/
+*.JPEG
+*.png
 
 .vscode/
 

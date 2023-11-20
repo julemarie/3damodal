@@ -1,86 +1,76 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
-def patchify(x, patch_size=16):
-        """
-            Patchify a batch of feature tensors.
-        """
-        K, C, H, W = x.shape
-        
-        x = x.reshape(K, C, H//patch_size, patch_size, W//patch_size, patch_size)
-        x = x.permute(0, 2, 4, 3, 5, 1)    # [K, H', W', p_H, p_W, C]
-        x = x.reshape(K, -1, *x.shape[3:])   # [K, H'*W', p_H, p_W, C]
-        x = x.reshape(K, x.shape[1], -1) # [K, H'*W', p_H*p_W*C]
+import math
 
-        return x
-
-
-class Attention(nn.Module):
-    """
-        (Multi-head) self-attention layer.
-    """
-    def __init__(self, embed_dim, num_heads):
+class MultiHeadAttention(nn.Module):
+    def __init__(self, inputq_dim, embed_dim, num_heads):
         super().__init__()
+        assert embed_dim % num_heads == 0 # embed_dim has to be divisible by num_heads
+        
         self.embed_dim = embed_dim
         self.num_heads = num_heads
-        self.qkv = nn.Linear(self.embed_dim, self.embed_dim*3)
+        self.proj_dim = embed_dim // num_heads
 
-    def __call__(self, x):
-        B, D, N = x.shape # B: #batches, D: embed_dim, N: 3
-        proj_dim = N // self.num_heads
-        
-        qkv = self.qkv(x).reshape(B, D, 3, self.num_heads, proj_dim).permute(2, 0, 3, 1, 4) # [3, B, num_heads, D, proj_dim]
-        q, k, v = qkv[0], qkv[1], qkv[2] # shape: [B, num_heads, D, proj_dim]
+        self.q = nn.Linear(inputq_dim, embed_dim)
+        self.kv = nn.Linear(embed_dim, 2*embed_dim)
 
-        att_scores = q @ k.transpose(2,3) # B x num_heads x D x D
-        att_scores_sm = torch.tensor(nn.functional.softmax(att_scores, -1))
-        weighted_vals = v[:,:,:,None,:] * att_scores_sm.transpose(-2,-1)[:,:,:,:,None] # B x num_heads x D x D x proj_dim
-        sum = weighted_vals.sum(dim=2) # B x num_heads x D x proj_dim
-        
-        out  = sum.reshape(B, D, N)
+        self.out_proj = nn.Linear(embed_dim, inputq_dim)
+
+        self._reset_parameters()
+
+    def _reset_parameters(self):
+        """ Initialization according to original Transformer. """
+        nn.init.xavier_uniform_(self.q.weight)
+        self.q.bias.data.fill_(0)
+        nn.init.xavier_uniform_(self.kv.weight)
+        self.kv.bias.data.fill_(0)
+        nn.init.xavier_uniform_(self.out_proj.weight)
+        self.out_proj.bias.data.fill_(0)
+
+    def scaled_dot_product(self, q, k, v):
+        d_k = q.shape[-1]
+        attn_logits = torch.matmul(q, k.transpose(-2, -1))
+        attn_logits = attn_logits / math.sqrt(d_k)
+        attention = F.softmax(attn_logits, dim=-1)
+        values = torch.matmul(attention, v)
+        return values, attention
+
+    def forward(self, input_q, input_kv):
+        B, N, D = input_kv.shape # B: batch_size, N: seq_length, D: embed_dim
+        _, Nq, Dq = input_q.shape
+
+        # Get queries from input_q (learnable mask queries of the different masks)
+        q = self.q(input_q).reshape(B, Nq, self.num_heads, self.proj_dim).permute(0, 2, 1, 3)
+
+        # Get keys and valuees from input_kv (the roi_embedding)
+        kv = self.kv(input_kv)
+        kv = kv.reshape(B, N, self.num_heads, 2*self.proj_dim)
+        kv = kv.permute(0, 2, 1, 3) # [Batch, Head, SeqLen, Dims]
+        k, v = kv.chunk(2, dim=-1)
+
+        # Determine value outputs
+        values, attention = self.scaled_dot_product(q, k, v)
+        values = values.permute(0, 2, 1, 3) # [Batch, SeqLen, Head, Dims]
+        values = values.reshape(B, Nq, self.embed_dim)
+        out = self.out_proj(values)
+
         return out
-    
-class CrossAttention(nn.Module):
-    """
-        (Multi-head) cross attention layer.
-    """
-    def __init__(self, dim, num_heads) -> None:
-        super().__init__()
-
-        self.num_heads = num_heads
-        self.q = nn.Linear(dim, dim)
-
-        self.kv = nn.Linear(dim, dim*2)
-
-    def forward(self, x, y):
-        B, D, N = x.shape # B: #batches, D: embed_dim, N: 3
-        By, Dy, Ny = y.shape # By == B and Ny == N
-        proj_dim = N // self.num_heads
-        proj_dim_y = Ny // self.num_heads
-        # get queries from x2 (embedded, encoded and masked future frame)
-        q = self.q(y).reshape(By, Dy, self.num_heads, proj_dim_y).permute(0, 2, 1, 3)
-        # get keys and values from unmasked frame
-        kv = self.kv(x).reshape(B, D, 2, self.num_heads, proj_dim).permute(2, 0, 3, 1, 4)
-        k, v = kv[0], kv[1]
-        print(q.shape)
-        print()
-        print("K", k.shape)
-
-        # from here it's the same as the self-attention
-        att_scores = q @ k.transpose(2,3) # B x num_heads x N x N
-        att_scores_sm = torch.tensor(nn.functional.softmax(att_scores, -1))
-        weighted_vals = v[:,:,:,None,:] * att_scores_sm.transpose(-2,-1)[:,:,:,:,None] # B x num_heads x N x N x proj_dim
-        sum = weighted_vals.sum(dim=2) # B x num_heads x N x proj_dim
-
-        out  = sum.reshape(By, Dy, Ny)
-        return out
-
 
 if __name__ == "__main__":
-        x = torch.ones((2, 3, 32, 32))
-        x = patchify(x, 16)
+    x = torch.ones((5,3,512,512))
+    # x = x.flatten(2).permute(0,2,1) # [K, H*W, C]
+    K, N, D  = x.shape
+    Q = torch.randn((1,D,3))
+    Q = Q.repeat((K, 1, 1))
 
-        
-        print(x.shape)
+
+
+    attn = MultiHeadAttention(3, 3, 1)
+
+    vals = attn(Q, Q)
+
+
 
 

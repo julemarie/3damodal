@@ -1,22 +1,26 @@
 # Model stuff
 MODEL_NAME: 3DAmodalFormer
 MODEL_CLASS: model:3DAmodalFormer
-MODEL: # Probably hard coded
+MODEL:
     WEIGHTS: "../checkpoints/"
     BACKBONE: "fasterrcnn_resnet50_fpn" #hardcoded for now
     PARAMS:
         INPUT_H: 540
         INPUT_W: 960
         IN_CHANS : 3
-        ROI_OUT_SIZE: 256
-        EMBED_DIM : 1024
-        DEPTH : 24
+        ROI_OUT_SIZE: 32
+        PATCH_SIZE: 16
+        Q_DIM: 3
+        EMBED_DIM : 3
+        ENCODER_DEPTH : 24
         ENCODER_HIDDEN_DIM : 1
-        NUM_HEADS : 16
-        DECODER_EMBED_DIM : 512
+        ENCODER_NUM_HEADS : 3
+        DECODER_EMBED_DIM : 3
         DECODER_DEPTH : 8
         DECODER_HIDDEN_DIM : 1
-        DECODER_NUM_HEADS : 16
+        DECODER_NUM_HEADS : 3
+
+
 # Training params
 OPTIMIZER: AdamW # Hard coded in src/pretraining.py
 OPTIMIZER_MOMENTUM:

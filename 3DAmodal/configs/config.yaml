@@ -39,16 +39,16 @@ ABLATION: False
 MASK_RATIO: 0.95
 RANDOM_SEED: 42
 DATASET: 
-    TRAIN:
-    - amodalsynthdrive_train
-    TEST:
-    - amodalsynthdrive_val
+    NAME: datasets.asd_dataset:AmodalSynthDriveDataset
+    TRAIN: /Midgard/Data/tibbe/datasets/AmodalSynthDrive/train
+    #/local_storage/users/tibbe/datasets/AmodalSynthDrive/train/
+    TEST: /local_storage/users/tibbe/datasets/AmodalSynthDrive/test/
 AUGMENTATION:   # Proably hard coded
     - hflip
     - crop:
         - 0.5
         - 1
-BATCH_SIZE: 1 # (2048)Probably hard coded
+BATCH_SIZE: 1
 OUTPUT_DIR:
     TRAINING: "./outputs/training/"
     TESTING: "./outputs/testing/"

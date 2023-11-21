@@ -16,13 +16,24 @@ class AmodalSynthDriveDataset(Dataset):
                              "left_full_",
                              "right_full_",
                              "bev_full_"]
-        self.settings = os.listdir(os.path.join(data_root, "lidar"))
+        self.settings = os.listdir(os.path.join(data_root, "images"))
 
     def __len__(self):
         return len(self.settings) * FRAMES_PER_SETTING
     
     def __getitem__(self, index):
         setting_name, str_id = self.map_to_folder(index)
+
+        while setting_name not in (os.listdir(os.path.join(self.data_root, "images")) and
+                                os.listdir(os.path.join(self.data_root, "bboxes")) and
+                                os.listdir(os.path.join(self.data_root, "amodal_instance_seg")) and
+                                os.listdir(os.path.join(self.data_root, "lidar"))):
+            setting_name, str_id = self.map_to_folder(index)
+
+        assert setting_name in os.listdir(os.path.join(self.data_root, "images")), "Folder {} not in directory {}.".format(setting_name, os.path.join(self.data_root, "images"))
+        assert setting_name in os.listdir(os.path.join(self.data_root, "bboxes")), "Folder {} not in directory {}.".format(setting_name, os.path.join(self.data_root, "bboxes"))
+        assert setting_name in os.listdir(os.path.join(self.data_root, "amodal_instance_seg")), "Folder {} not in directory {}.".format(setting_name, os.path.join(self.data_root, "amodal_instance_seg"))
+        assert setting_name in os.listdir(os.path.join(self.data_root, "lidar")), "Folder {} not in directory {}.".format(setting_name, os.path.join(self.data_root, "lidar"))
 
         imgs = self.get_imgs(setting_name, str_id)
         bboxes = self.get_bboxes(setting_name, str_id)

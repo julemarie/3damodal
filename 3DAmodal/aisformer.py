@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 
 from omegaconf import OmegaConf
 
-from utils import Attention, CrossAttention, MultiHeadAttention
+from utils import MultiHeadAttention
 
 
 class AISFormer(nn.Module):

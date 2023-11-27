@@ -95,21 +95,23 @@ class Trainer():
                 # 1) fetch necessary data from data and anns
                 h, w = anns['img_height'], anns['img_width']
                 amodal_mask = self.decode_mask_rle(anns['amodal_full'])
-                seg_masks = torch.zeros((1, h, w))
-                inmodal_masks = torch.zeros((1, h, w))
+                seg_masks = []
+                inmodal_masks = []
                 for key in anns.keys():
                     if key == "amodal_full" or key == "img_height" or key == "img_width":
                         continue
                     segmentation = self.decode_mask_lst(anns[key]['segmentation'], h, w)
                     anns[key]['inmodal_seg']['counts'] = anns[key]['inmodal_seg']['counts'][0]
                     inmodal_seg = self.decode_mask_rle(anns[key]['inmodal_seg'])
-                    inmodal_masks += inmodal_seg
-                    seg_masks += segmentation
+                    inmodal_masks.append(inmodal_seg)
+                    seg_masks.append(segmentation)
                     save_image(inmodal_seg, "test_seg.png")
-                # seg_masks = torch.stack(seg_masks)
-                # inmodal_masks = torch.stack(inmodal_masks, dim=1)
+                seg_masks = torch.stack(seg_masks)
+                inmodal_masks = torch.stack(inmodal_masks)
+                combined_seg = torch.einsum('nchw->chw', seg_masks)
+                combined_inmodal = torch.einsum('nchw->chw', inmodal_masks)
                 # supermasks = torch.stack((inmodal_masks, seg_masks))
-                save_image(inmodal_masks, "test_seg.png")
+                save_image(combined_inmodal, "test_seg.png")
                 tf = transforms.Resize((540,960))
                 amodal_mask = tf(amodal_mask)
                 save_image(amodal_mask, "test_mask.png")

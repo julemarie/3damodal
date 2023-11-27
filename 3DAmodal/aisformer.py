@@ -90,7 +90,7 @@ class AISFormer(nn.Module):
         roi_list = []
         for i, ann in enumerate(x):
             boxes = ann["boxes"][torch.where(ann["scores"] > thresh)]
-            id = i*torch.ones((boxes.shape[0])).unsqueeze(-1)
+            id = i*torch.ones((boxes.shape[0]), dtype=torch.int).unsqueeze(-1)
             roi_list.append(torch.cat((id, boxes), dim=1))
 
         rois = torch.cat(roi_list, dim=0) # [K, 5] K: #bboxes, 5: first for id and last four for corners
@@ -109,7 +109,11 @@ class AISFormer(nn.Module):
         roi_embed = self.unflatten(f_roi1.flatten(2) + f_e.permute(0,2,1)) # [K, C, H_m, W_m]
         # roi_embed = self.unpatchify(f_roi1) # [K, C, H_m, W_m]
         masks = torch.tensordot(roi_embed, torch.cat((Q, I_i), dim=1), dims=([1], [0])).permute(0,3,1,2)
-        return masks # [K, 4, H_m, W_m]
+        masks -= masks.min(1, keepdim=True)[0]
+        masks /= masks.max(1, keepdim=True)[0]
+        # masks = masks.to(torch.bool)
+        # masks = masks.to(torch.float)
+        return masks, rois # [K, 4, H_m, W_m]
 
 
 class Encoder(nn.Module):

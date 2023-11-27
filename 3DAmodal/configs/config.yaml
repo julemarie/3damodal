@@ -22,13 +22,13 @@ MODEL:
 
 
 # Training params
-OPTIMIZER: AdamW # Hard coded in src/pretraining.py
+OPTIMIZER: SGD # Hard coded in src/pretraining.py
 OPTIMIZER_MOMENTUM:
     BETA1: 0.9
     BETA2: 0.95
 WEIGHT_DECAY: 5.0e-2 
 BASE_LEARNING_RATE: 1.0e-3
-LEARNING_RATE: 1.5e-4
+LEARNING_RATE: 2.5e-3
 MIN_LEARNING_RATE: 0.0
 LEARNING_RATE_SCHEDULER: cosine decay # Hard coded in src/pretraining.py
 WARMUP_EPOCHS: 40
@@ -39,8 +39,8 @@ ABLATION: False
 MASK_RATIO: 0.95
 RANDOM_SEED: 42
 DATASET: 
-    NAME: datasets.asd_dataset:AmodalSynthDriveDataset
-    TRAIN: /Midgard/Data/tibbe/datasets/AmodalSynthDrive/train
+    NAME: datasets.KINS_dataset:KINS # datasets.asd_dataset:AmodalSynthDriveDataset
+    TRAIN: /Midgard/Data/tibbe/datasets/KINS/ #/Midgard/Data/tibbe/datasets/AmodalSynthDrive/train
     #/local_storage/users/tibbe/datasets/AmodalSynthDrive/train/
     TEST: /local_storage/users/tibbe/datasets/AmodalSynthDrive/test/
 AUGMENTATION:   # Proably hard coded

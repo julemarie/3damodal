@@ -21,7 +21,7 @@ class Trainer():
         self.cfg = OmegaConf.load(cfg_path)
         self.in_shape = tuple((self.cfg.MODEL.PARAMS.INPUT_H, self.cfg.MODEL.PARAMS.INPUT_W))
 
-        if try_cuda:
+        if self.cfg.DEVICE == 'cuda':
             self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         else:
             self.device = 'cpu'
@@ -57,7 +57,14 @@ class Trainer():
 
 
     def crop_and_resize_mask(self, mask, roi):
-        y_min, x_min, y_max, x_max = roi
+        """
+            Crop and resize a mask to match the format of the prediciton masks.
+
+            Inputs:
+                mask: Tensor [H, W]
+                roi: Tensor [5]
+        """
+        _, y_min, x_min, y_max, x_max = roi
         cropped_mask = mask[x_min:x_max, y_min:y_max]
         resized_mask = cropped_mask.resize_(self.roi_size)
         # resized_mask = self.resize(cropped_mask)
@@ -66,7 +73,6 @@ class Trainer():
 
     def compute_loss(self, pred_mask, gt_mask):
         bce_loss = torch.nn.BCELoss()
-
         return bce_loss(pred_mask, gt_mask)
 
 
@@ -146,23 +152,42 @@ class Trainer():
         return gt_vis_masks, gt_amod_masks, gt_occl_masks, gt_invis_masks
     
     def calculate_IOU(self, mask1, mask2):
-        intersection = (mask1 & mask2).float().sum((1,2))
-        union = (mask1 | mask2).float().sum((1,2))
+        """
+            Calculate IOU between two given masks.
+        """
+        intersection = (mask1.int() & mask2.int()).float().sum((0,1))
+        union = (mask1.int() | mask2.int()).float().sum((0,1))
         iou = (intersection + 1e-6) / (union + 1e-6)
         return iou
 
     def calculate_IOU_matrix(self, pred_masks, gt_masks, bbs):
+        """
+            Calculate IOU matrix between prediction masks and GT masks.
+            Input:
+                pred_masks: Tensor [K, 1, 64, 64]
+                gt_masks: Tensor [K_gt, 2, 540, 960]
+                bbs: Tensor [K, 5]
+                full_mask: bool (if True, shape of gt_masks: [4, 3, 540, 960])
+            Output:
+                iou_matrix: Tensor [K, K_gt]
+        """
         num_pred = pred_masks.shape[0]
         num_gt = gt_masks.shape[0]
         iou_matrix = torch.zeros((num_pred, num_gt))
         for i in range(num_pred):
             for j in range(num_gt):
-                gt_mask_roi = self.crop_and_resize_mask(gt_masks[j], bbs[i])
-                iou_matrix[i, j] = self.calculate_IOU(pred_masks[i], gt_mask_roi)
+                if gt_masks[j, 1, 0, 0] == bbs[i, 0]: # check if gt mask is in same image as prediction
+                    gt_mask_roi = self.crop_and_resize_mask(gt_masks[j], bbs[i])
+                    iou_matrix[i, j] = self.calculate_IOU(pred_masks[i], gt_mask_roi)
+                else:
+                    iou_matrix[i, j] = 0.0
 
         return iou_matrix
     
-    def assign_iou(self, pred_masks, gt_masks, bbs, iou_threshold=0.5):
+    def assign_iou(self, pred_masks, gt_masks,  bbs, iou_threshold=0.5):
+        """
+            Assign pred masks to GT masks for loss calculation using IOU matrix and the Hungarian algorithm for optimal assignment.
+        """
         iou_matrix = self.calculate_IOU_matrix(pred_masks, gt_masks, bbs)
 
         cost_matrix = 1 - iou_matrix
@@ -177,84 +202,99 @@ class Trainer():
                 assigned_masks[i] = 'fp' # false positive if not above iou_thresh
             
         return assigned_masks
+    
+    def compute_losses(self, assignment, pred_masks, gt_masks, bbs):
+        """
+            Compute the loss for one type of mask (occluder, invisible, amodal).
+
+            Inputs:
+                assignment: dict (dict containing mapping between corresponding masks)
+                pred_masks: Tensor [K, 1, 64, 64]
+                gt_masks: Tensor [K_gt, 2, 540, 960]
+                bbs: Tensor [K, 5]
+        """
+        loss = 0
+        for i, j in assignment.items():
+            if j == 'fp': # if false positive
+                zero_mask = torch.zeros((pred_masks[i].shape), device=self.device)
+                loss += self.compute_loss(pred_masks[i], zero_mask)
+            else:
+                gt_mask = self.crop_and_resize_mask(gt_masks[j, 1], bbs[i])
+                loss += self.compute_loss(pred_masks[i], gt_mask)
+        return loss
+    
+    def compute_loss_vis(self, pred_masks, gt_masks, bbs):
+        """
+            Compute the loss for the visible masks (need to be treated differently because the input is different).
+
+            Inputs:
+                pred_masks: Tensor [K, 1, 64, 64]
+                gt_masks: Tensor [4, 3, 540, 960]
+                bbs: Tensor [K, 5]
+        """
+        loss = 0
+        for i in range(bbs.shape[0]):
+            gt_mask = self.crop_and_resize_mask(gt_masks[bbs[i, 0],0], bbs[i])
+            loss += self.compute_loss(pred_masks[i], gt_mask)
+
+        return loss
 
     def train(self):
-
+        print("Starting training...")
+        # clear gpu memory
+        torch.cuda.empty_cache()
         for epoch_idx in tqdm(range(self.epochs)):
             # for data, anns in self.dataloader:
             for img_batch, anns in self.dataloader:
                 # 1) Extract masks from annotations
                 gt_vis_masks, gt_amod_masks, gt_occl_masks, gt_invis_masks = self.get_gt_masks_asd(anns)
+                gt_vis_masks = gt_vis_masks.to(self.device)
+                gt_amod_masks = gt_amod_masks.to(self.device)
+                gt_occl_masks = gt_occl_masks.to(self.device)
+                gt_invis_masks = gt_invis_masks.to(self.device)
                 # img_batch size: [B, 5, 3, 540, 960]
                 img_batch = img_batch[:,:4] # we don't care about the BEV image here
                 B, V, C, H, W = img_batch.shape
                 img_batch = img_batch.reshape((B*V, C, H, W))
+                img_batch = img_batch.to(self.device)
                 
                 # 2) pass images through model (output will be the four masks)
-                # img = cv2.imread("3DAmodal/front_full_0000_rgb.jpg")
-                # img2 = cv2.imread("3DAmodal/front_full_0063_rgb.jpg")
-                # H, W, C = img.shape # for ASD: [1080, 1920, 3]
-                # transform = transforms.Compose([
-                #     transforms.ToTensor(),
-                #     transforms.ConvertImageDtype(torch.float),
-                #     transforms.RandomCrop((int(H/1.5), int(W/1.5))),
-                #     transforms.Resize(self.in_shape)
-                # ])
-                # img = transform(img).unsqueeze(0)
-                # img2 = transform(img2).unsqueeze(0)
-
-                # imgs = torch.cat((img, img2), dim=0)
-                # gt_amod_masks = torch.ones((1, 1, 540, 960))
-                # gt_occl_masks = torch.ones((1, 1, 540, 960))
-                # gt_vis_masks = torch.ones((4, 3, 540, 960))
-                # gt_vis_masks = gt_vis_masks[:,0,:,:] # has three channels, but they're all the same
-                # gt_invis_masks = gt_amod_masks - gt_vis_masks
-
                 masks, rois = self.model(img_batch) # [K, 4, 64, 64], [K, 5]
-                rois = rois.to(torch.int)
+                torch.cuda.empty_cache()
+                rois = rois.to(torch.int).to('cpu')
                 K, num_masks, H_m, W_m = masks.shape
                 m_o = masks[:, 0]
                 m_v = masks[:, 1]
                 m_a = masks[:, 2]
                 m_i = masks[:, 3]
-
-
-
+                
                 # 3) calculate the loss
                 # 3.1) assign predicted masks to gt masks using IOU matrix and Hungarian algorithm
+                # for occluder masks:
+                assigned_masks_o = self.assign_iou(m_o, gt_occl_masks, bbs=rois)
+                assigned_masks_a = self.assign_iou(m_a, gt_amod_masks, bbs=rois)
+                assigned_masks_i = self.assign_iou(m_i, gt_invis_masks, bbs=rois)
 
+                # 3.2) calculate the losses
+                loss_o = self.compute_losses(assigned_masks_o, m_o, gt_occl_masks, bbs=rois)
+                loss_a = self.compute_losses(assigned_masks_a, m_a, gt_amod_masks, bbs=rois)
+                loss_i = self.compute_losses(assigned_masks_i, m_i, gt_invis_masks, bbs=rois)
+                loss_v = self.compute_loss_vis(m_v, gt_vis_masks, rois)
+                
+                # 3.3) accumulate the losses
+                total_loss = loss_o + loss_a + loss_i + loss_v
 
-                total_loss = 0
-                # for i in range()
-                for ins in range(K):
-                    bbx = rois[ins, 1:]
-                    img_id = rois[ins, 0]
-                    # crop GT masks to bbx
-                    gt_vis_mask = self.crop_and_resize_mask(gt_vis_masks[img_id], bbx)
-                    loss_v = self.compute_loss(m_v[ins], gt_vis_mask)
-                    loss_o = 1e6
-                    loss_a = 1e6
-                    loss_i = 1e6
-                    for mask_id in range(gt_amod_masks.shape[0]):
-                        gt_amod_mask = self.crop_and_resize_mask(gt_amod_masks[mask_id], bbx)
-                        gt_occl_mask = self.crop_and_resize_mask(gt_occl_masks[mask_id], bbx)
-                        gt_invis_mask = self.crop_and_resize_mask(gt_invis_masks[mask_id], bbx)
-                        loss_ok = self.compute_loss(m_o[ins], gt_occl_mask)
-                        if loss_ok < loss_o:
-                            loss_o = loss_ok
-                        loss_ak = self.compute_loss(m_a[ins], gt_amod_mask)
-                        if loss_ak < loss_a:
-                            loss_a = loss_ak
-                        loss_ik = self.compute_loss(m_i[ins], gt_invis_mask)
-                        if loss_ik < loss_i:
-                            loss_i = loss_ik
-                    
-                    total_loss += loss_o + loss_a + loss_i + loss_v
+                torch.cuda.empty_cache()
 
                 # 4) update the weights (for this we need to define an optimizer -> check paper)
                 self.optimizer.zero_grad()
+                print("BACKWARD")
                 total_loss.backward()
+                print("BACHWARD DONE")
                 self.optimizer.step()
+
+                torch.cuda.empty_cache()
+
                 # 5) start training and save masks, feature tensors, and attention maps for visualisation (check paper what they used)
 
             print("Loss after epoch {}: {}".format(epoch_idx, total_loss))

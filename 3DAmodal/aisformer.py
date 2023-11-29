@@ -27,23 +27,22 @@ class AISFormer(nn.Module):
         self.H, self.W = in_shape
         self.in_chans = cfg.MODEL.PARAMS.IN_CHANS
         self.roi_out_size = cfg.MODEL.PARAMS.ROI_OUT_SIZE
-        self.patch_size = cfg.MODEL.PARAMS.PATCH_SIZE
         self.Q_dim = cfg.MODEL.PARAMS.Q_DIM
         self.embed_dim = cfg.MODEL.PARAMS.EMBED_DIM
         self.encoder_depth = cfg.MODEL.PARAMS.ENCODER_DEPTH
         self.encoder_num_heads = cfg.MODEL.PARAMS.ENCODER_NUM_HEADS
         self.decoder_depth = cfg.MODEL.PARAMS.DECODER_DEPTH
         self.decoder_num_heads = cfg.MODEL.PARAMS.DECODER_NUM_HEADS
-        # compute num of patches and embed dim
-        # self.num_patches = (self.roi_out_size*2)//self.patch_size * (self.roi_out_size*2)//self.patch_size
-        # self.encoder_embed_dim = self.patch_size**2 * self.in_chans
+        if cfg.DEVICE == 'cuda':
+            self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        else:
+            self.device = 'cpu'
 
         # output of backbone: list of dictionaries {boxes: tensor(4,num_boxes), labels: tensor(num_boxes), scores: tensor(num_boxes)}
         self.backbone = fasterrcnn_resnet50_fpn(pretrained=True)
         self.backbone.eval()
         # ROIAlign takes images and ROIs as input and outputs a tensor of size [K, in_chans, (OUT_SIZE)] where K = #bboxes
         self.roi_align = RoIAlign(output_size=(self.roi_out_size, self.roi_out_size), spatial_scale=1, sampling_ratio=2,aligned=True)
-        # self.next = nn.Conv2d(256, 256, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1))
         # deconvolution 
         self.deconv = nn.ConvTranspose2d(in_channels=self.in_chans, out_channels=self.in_chans, kernel_size=(2,2), stride=2)
         self.conv = nn.Conv2d(in_channels=self.in_chans, out_channels=self.in_chans, kernel_size=(1,1), stride=1)
@@ -90,15 +89,13 @@ class AISFormer(nn.Module):
         roi_list = []
         for i, ann in enumerate(x):
             boxes = ann["boxes"][torch.where(ann["scores"] > thresh)]
-            id = i*torch.ones((boxes.shape[0]), dtype=torch.int).unsqueeze(-1)
+            id = i*torch.ones((boxes.shape[0]), dtype=torch.int, device=self.device).unsqueeze(-1)
             roi_list.append(torch.cat((id, boxes), dim=1))
 
         rois = torch.cat(roi_list, dim=0) # [K, 5] K: #bboxes, 5: first for id and last four for corners
 
         f_roi2 = self.roi_align(imgs, rois) # [K, C, H_r, W_r]
         f_roi1 = self.conv(self.deconv(f_roi2)) # [K, C, H_r', W_r']
-        # patchify image before passing it to encoder
-        # f_roi_patch = self.patchify(f_roi1) # [K, num_patches, C']
         f_e = self.encoder(f_roi1) # [K, H_m*W_m, C]
         Q = self.decoder(f_e) # [C, 3]
         Q_vis_am = torch.cat((Q[:,1], Q[:,2]), dim=0)
@@ -107,12 +104,9 @@ class AISFormer(nn.Module):
             I_i = F.gelu(layer(I_i)) if i < len(self.mlp)-1 else layer(I_i)  # [C]
         I_i = I_i.unsqueeze(-1)
         roi_embed = self.unflatten(f_roi1.flatten(2) + f_e.permute(0,2,1)) # [K, C, H_m, W_m]
-        # roi_embed = self.unpatchify(f_roi1) # [K, C, H_m, W_m]
         masks = torch.tensordot(roi_embed, torch.cat((Q, I_i), dim=1), dims=([1], [0])).permute(0,3,1,2)
         masks -= masks.min(1, keepdim=True)[0]
         masks /= masks.max(1, keepdim=True)[0]
-        # masks = masks.to(torch.bool)
-        # masks = masks.to(torch.float)
         return masks, rois # [K, 4, H_m, W_m]
 
 
@@ -126,7 +120,6 @@ class Encoder(nn.Module):
         self.embed_dim = embed_dim
         self.pos_encod = nn.Parameter(torch.zeros(1, seq_len, self.embed_dim))
         self.attention = MultiHeadAttention(embed_dim, embed_dim, num_heads)
-        # self.attention = Attention(self.embed_dim, num_heads)
         self.norm = nn.LayerNorm(self.embed_dim)
         self.ffn = nn.Linear(self.embed_dim, self.embed_dim)
 
@@ -154,11 +147,9 @@ class Decoder(nn.Module):
 
         self.Q = nn.Parameter(torch.ones((embed_dim, Q_dim)).unsqueeze(0))
 
-        # self.attention = Attention(in_chans, num_heads)
         self.attention = MultiHeadAttention(Q_dim, Q_dim, num_heads)
         self.norm_self = nn.LayerNorm(Q_dim)
         self.ffn_self = nn.Linear(Q_dim, Q_dim)
-        # self.cross_attention = CrossAttention(in_chans, num_heads)
         self.cross_attention = MultiHeadAttention(Q_dim,embed_dim, num_heads)
         self.norm_cross1 = nn.LayerNorm(Q_dim)
         self.ffn_cross1 = nn.Linear(Q_dim, Q_dim)
@@ -211,8 +202,4 @@ if __name__ == "__main__":
     masks = aisformer(imgs) 
     
     print(masks.shape)
-
-
-    
-    # masks = aisformer(imgs)
     

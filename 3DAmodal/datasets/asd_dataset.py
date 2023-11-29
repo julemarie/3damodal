@@ -1,4 +1,5 @@
 import torch
+from torchvision import transforms
 import numpy as np
 from torch.utils.data import Dataset, DataLoader
 import os
@@ -10,20 +11,20 @@ from pycocotools import mask as coco_mask
 
 FRAMES_PER_SETTING = 100
 
-def custom_collate_fn(batch):
-    # 'batch' is a list of dictionaries where each dictionary has keys corresponding to views (e.g., 'front_full_', 'lidar')
+# def custom_collate_fn(batch):
+#     # 'batch' is a list of dictionaries where each dictionary has keys corresponding to views (e.g., 'front_full_', 'lidar')
 
-    # Separate the batch into lists of dictionaries for X and Y
-    X_batch, Y_batch = zip(*batch)
+#     # Separate the batch into lists of dictionaries for X and Y
+#     X_batch, Y_batch = zip(*batch)
 
-    # Combine dictionaries in X_batch and Y_batch into a single dictionary for each
-    X_collated = {key: torch.stack([sample[key] for sample in X_batch]) for key in X_batch[0]}
-    Y_collated = {key: torch.stack([sample[key] for sample in Y_batch]) for key in Y_batch[0]}
+#     # Combine dictionaries in X_batch and Y_batch into a single dictionary for each
+#     X_collated = {key: torch.stack([sample[key] for sample in X_batch]) for key in X_batch[0]}
+#     Y_collated = {key: torch.stack([sample[key] for sample in Y_batch]) for key in Y_batch[0]}
 
-    return X_collated, Y_collated
+#     return X_collated, Y_collated
 
 class AmodalSynthDriveDataset(Dataset):
-    def __init__(self, data_root):
+    def __init__(self, data_root, transform=None):
         self.data_root = data_root
         self.img_settings = ["front_full_",
                              "back_full_",
@@ -32,24 +33,30 @@ class AmodalSynthDriveDataset(Dataset):
                              "bev_full_"]
         self.settings = os.listdir(os.path.join(data_root, "amodal_instance_seg"))
 
+        if transform is None:
+            self.transform = transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Resize((540, 960))
+            ])
+
     def __len__(self):
         return len(self.settings) * FRAMES_PER_SETTING
     
     def __getitem__(self, index):
         setting_name, str_id = self.map_to_folder(index)
 
-        # while setting_name not in (os.listdir(os.path.join(self.data_root, "images")) and
-        #                         os.listdir(os.path.join(self.data_root, "bboxes")) and
-        #                         os.listdir(os.path.join(self.data_root, "amodal_instance_seg")) and
-        #                         os.listdir(os.path.join(self.data_root, "lidar"))):
-        #     setting_name, str_id = self.map_to_folder(index)
+        while setting_name not in (os.listdir(os.path.join(self.data_root, "images")) and
+                                os.listdir(os.path.join(self.data_root, "bboxes")) and
+                                os.listdir(os.path.join(self.data_root, "amodal_instance_seg")) and
+                                os.listdir(os.path.join(self.data_root, "lidar"))):
+            setting_name, str_id = self.map_to_folder(index)
 
-        # assert setting_name in os.listdir(os.path.join(self.data_root, "images")), "Folder {} not in directory {}.".format(setting_name, os.path.join(self.data_root, "images"))
-        # assert setting_name in os.listdir(os.path.join(self.data_root, "bboxes")), "Folder {} not in directory {}.".format(setting_name, os.path.join(self.data_root, "bboxes"))
-        # assert setting_name in os.listdir(os.path.join(self.data_root, "amodal_instance_seg")), "Folder {} not in directory {}.".format(setting_name, os.path.join(self.data_root, "amodal_instance_seg"))
-        # assert setting_name in os.listdir(os.path.join(self.data_root, "lidar")), "Folder {} not in directory {}.".format(setting_name, os.path.join(self.data_root, "lidar"))
+        assert setting_name in os.listdir(os.path.join(self.data_root, "images")), "Folder {} not in directory {}.".format(setting_name, os.path.join(self.data_root, "images"))
+        assert setting_name in os.listdir(os.path.join(self.data_root, "bboxes")), "Folder {} not in directory {}.".format(setting_name, os.path.join(self.data_root, "bboxes"))
+        assert setting_name in os.listdir(os.path.join(self.data_root, "amodal_instance_seg")), "Folder {} not in directory {}.".format(setting_name, os.path.join(self.data_root, "amodal_instance_seg"))
+        assert setting_name in os.listdir(os.path.join(self.data_root, "lidar")), "Folder {} not in directory {}.".format(setting_name, os.path.join(self.data_root, "lidar"))
 
-        # imgs = self.get_imgs(setting_name, str_id)
+        imgs = self.get_imgs(setting_name, str_id)
         # bboxes = self.get_bboxes(setting_name, str_id)
         aminseg_anno = self.get_amodal_instance_annos(setting_name, str_id)
         # lidar = self.get_lidar(setting_name, str_id)
@@ -74,7 +81,7 @@ class AmodalSynthDriveDataset(Dataset):
         #         anno["bbox"] = np.array(bboxes[anno["track_id"]])
         #     Y[view] = annos
 
-        return torch.zeros((2,2)), aminseg_anno
+        return imgs, aminseg_anno
 
 
     def map_to_folder(self, index):
@@ -90,7 +97,11 @@ class AmodalSynthDriveDataset(Dataset):
         for img_view in self.img_settings:
             img_path = os.path.join(self.data_root, "images", setting_name, img_view + str_id + "_rgb.jpg")
             img = cv.imread(img_path)
+            img = cv.cvtColor(img, cv.COLOR_BGR2RGB)
+            img = self.transform(img)
             imgs.append(img)
+
+        imgs = torch.stack(imgs)
 
         return imgs
     
@@ -121,13 +132,14 @@ class AmodalSynthDriveDataset(Dataset):
                     # print(anno[key]["amodal_mask"])
                     occl_mask = coco_mask.decode(anno[key]["occlusion_mask"])
                     amod_mask = coco_mask.decode(anno[key]["amodal_mask"])
+                    
+                    img_annos[anno[key]["track_id"]]["occlusion_mask"] = self.transform(occl_mask)
+                    img_annos[anno[key]["track_id"]]["amodal_mask"] = self.transform(amod_mask)
 
-                    img_annos[anno[key]["track_id"]]["occlusion_mask"] = torch.tensor(occl_mask, dtype=torch.float).unsqueeze(0)
-                    img_annos[anno[key]["track_id"]]["amodal_mask"] = torch.tensor(amod_mask, dtype=torch.float).unsqueeze(0)
-
-            # amodal_path = ".".join([amodal_path.split(".")[0], "png"])
-            # mask = cv.imread(amodal_path)
-            # img_annos["visible_mask"] = mask
+            amodal_path = ".".join([amodal_path.split(".")[0], "png"])
+            mask = cv.imread(amodal_path)
+            mask = self.transform(mask)
+            img_annos["visible_mask"] = mask
             masks_dict_list.append(img_annos)
             
         assert len(masks_dict_list) == len(self.img_settings) - 1, "The dictionary does not have the right size!"
@@ -152,7 +164,7 @@ if __name__ == "__main__":
     dl = DataLoader(ds, batch_size=1)
     for amodl_anns in dl:
         print(type(amodl_anns))
-        print(amodl_anns.keys())
+        # print(amodl_anns.keys())
 
 
         

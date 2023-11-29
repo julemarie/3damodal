@@ -13,6 +13,7 @@ import torch
 from torchvision import transforms
 from torch.utils.data import DataLoader
 from torchvision.utils import save_image
+from scipy.optimize import linear_sum_assignment
 
 
 class Trainer():
@@ -47,6 +48,12 @@ class Trainer():
         self.optimizer = torch.optim.SGD(self.model.parameters(), lr=self.cfg.LEARNING_RATE)
 
         self.epochs = self.cfg.EPOCHS
+
+        self.viewstr2int = {"front_full": 0,
+                            "back_full": 1,
+                            "left_full": 2,
+                            "righ_full": 3,
+                            "bev_full": 4}
 
 
     def crop_and_resize_mask(self, mask, roi):
@@ -85,66 +92,125 @@ class Trainer():
         mask = torch.tensor(mask, dtype=torch.float).unsqueeze(0)
         return mask
 
+
+    def get_masks_kins(self, anns):
+        anns['amodal_full']['counts'] = anns['amodal_full']['counts'][0]
+        # 1) fetch necessary data from data and anns
+        h, w = anns['img_height'], anns['img_width']
+        amodal_mask = self.decode_mask_rle(anns['amodal_full'])
+        seg_masks = []
+        inmodal_masks = []
+        for key in anns.keys():
+            if key == "amodal_full" or key == "img_height" or key == "img_width":
+                continue
+            segmentation = self.decode_mask_lst(anns[key]['segmentation'], h, w)
+            anns[key]['inmodal_seg']['counts'] = anns[key]['inmodal_seg']['counts'][0]
+            inmodal_seg = self.decode_mask_rle(anns[key]['inmodal_seg'])
+            inmodal_masks.append(inmodal_seg)
+            seg_masks.append(segmentation)
+            save_image(inmodal_seg, "test_seg.png")
+        seg_masks = torch.stack(seg_masks)
+        inmodal_masks = torch.stack(inmodal_masks)
+        # combined_seg = torch.einsum('nchw->chw', seg_masks)
+        # combined_inmodal = torch.einsum('nchw->chw', inmodal_masks)
+
+        return inmodal_masks, seg_masks
+    
+    def get_gt_masks_asd(self, anns):
+        gt_vis_masks = [ann['visible_mask'].squeeze(0) for ann in anns]
+        gt_vis_masks = torch.stack(gt_vis_masks) # [4, 3, 540, 960]
+        gt_amod_masks = []
+        gt_invis_masks = []
+        gt_occl_masks = []
+        for i, ann in enumerate(anns):
+            for key in ann.keys():
+                if key == 'visible_mask':
+                    continue
+                if not ann[key]['occlusion_mask'] == []:
+                    occl_mask = ann[key]['occlusion_mask'].squeeze()
+                    im_id = i*torch.ones(occl_mask.shape)
+                    occl_mask = torch.stack((occl_mask,im_id))
+                    gt_occl_masks.append(occl_mask)
+                    amod_mask = ann[key]['amodal_mask'].squeeze()
+                    amod_mask = torch.stack((amod_mask,im_id))
+                    gt_amod_masks.append(amod_mask)
+                    invis_mask = amod_mask[0] - gt_vis_masks[i,0]
+                    invis_mask[invis_mask<0] = 0
+                    invis_mask = torch.stack((invis_mask,im_id))
+                    gt_invis_masks.append(invis_mask)
+        
+        gt_amod_masks = torch.stack(gt_amod_masks) # [K_gt, 2, 540, 960]
+        gt_occl_masks = torch.stack(gt_occl_masks) # [K_gt, 2, 540, 960]
+        gt_invis_masks = torch.stack(gt_invis_masks) # [K_gt, 2, 540, 960]
+
+        return gt_vis_masks, gt_amod_masks, gt_occl_masks, gt_invis_masks
+    
+    def calculate_IOU(self, mask1, mask2):
+        intersection = (mask1 & mask2).float().sum((1,2))
+        union = (mask1 | mask2).float().sum((1,2))
+        iou = (intersection + 1e-6) / (union + 1e-6)
+        return iou
+
+    def calculate_IOU_matrix(self, pred_masks, gt_masks, bbs):
+        num_pred = pred_masks.shape[0]
+        num_gt = gt_masks.shape[0]
+        iou_matrix = torch.zeros((num_pred, num_gt))
+        for i in range(num_pred):
+            for j in range(num_gt):
+                gt_mask_roi = self.crop_and_resize_mask(gt_masks[j], bbs[i])
+                iou_matrix[i, j] = self.calculate_IOU(pred_masks[i], gt_mask_roi)
+
+        return iou_matrix
+    
+    def assign_iou(self, pred_masks, gt_masks, bbs, iou_threshold=0.5):
+        iou_matrix = self.calculate_IOU_matrix(pred_masks, gt_masks, bbs)
+
+        cost_matrix = 1 - iou_matrix
+        # Hungarian algorithm
+        row_indices, col_indices = linear_sum_assignment(cost_matrix)
+
+        assigned_masks = {}
+        for i, j in zip(row_indices, col_indices):
+            if iou_matrix[i, j] >= iou_threshold:
+                assigned_masks[i] = j # assign pred i to gt j
+            else:
+                assigned_masks[i] = 'fp' # false positive if not above iou_thresh
+            
+        return assigned_masks
+
     def train(self):
 
         for epoch_idx in tqdm(range(self.epochs)):
             # for data, anns in self.dataloader:
             for img_batch, anns in self.dataloader:
-                # TODO: 
-                anns['amodal_full']['counts'] = anns['amodal_full']['counts'][0]
-                # 1) fetch necessary data from data and anns
-                h, w = anns['img_height'], anns['img_width']
-                amodal_mask = self.decode_mask_rle(anns['amodal_full'])
-                seg_masks = []
-                inmodal_masks = []
-                for key in anns.keys():
-                    if key == "amodal_full" or key == "img_height" or key == "img_width":
-                        continue
-                    segmentation = self.decode_mask_lst(anns[key]['segmentation'], h, w)
-                    anns[key]['inmodal_seg']['counts'] = anns[key]['inmodal_seg']['counts'][0]
-                    inmodal_seg = self.decode_mask_rle(anns[key]['inmodal_seg'])
-                    inmodal_masks.append(inmodal_seg)
-                    seg_masks.append(segmentation)
-                    save_image(inmodal_seg, "test_seg.png")
-                seg_masks = torch.stack(seg_masks)
-                inmodal_masks = torch.stack(inmodal_masks)
-                combined_seg = torch.einsum('nchw->chw', seg_masks)
-                combined_inmodal = torch.einsum('nchw->chw', inmodal_masks)
-                # supermasks = torch.stack((inmodal_masks, seg_masks))
-                save_image(combined_inmodal, "test_seg.png")
-                tf = transforms.Resize((540,960))
-                amodal_mask = tf(amodal_mask)
-                save_image(amodal_mask, "test_mask.png")
-                save_image(img_batch, "test_img.png")
-                # imgs = []
-                # for view in self.img_views:
-                #     imgs.append(data[view])
+                # 1) Extract masks from annotations
+                gt_vis_masks, gt_amod_masks, gt_occl_masks, gt_invis_masks = self.get_gt_masks_asd(anns)
+                # img_batch size: [B, 5, 3, 540, 960]
+                img_batch = img_batch[:,:4] # we don't care about the BEV image here
+                B, V, C, H, W = img_batch.shape
+                img_batch = img_batch.reshape((B*V, C, H, W))
                 
-                # imgs = torch.tensor(imgs)
-                # print(imgs.shape)
-                # There are some issues on gondor with the dataset, the settings that are in the images folder don't seeem to exist in any of the annotation folders.
-                # TODO: Re-upload the dataset (or at least the images)
                 # 2) pass images through model (output will be the four masks)
-                img = cv2.imread("3DAmodal/front_full_0000_rgb.jpg")
-                img2 = cv2.imread("3DAmodal/front_full_0063_rgb.jpg")
-                H, W, C = img.shape # for ASD: [1080, 1920, 3]
-                transform = transforms.Compose([
-                    transforms.ToTensor(),
-                    transforms.ConvertImageDtype(torch.float),
-                    transforms.RandomCrop((int(H/1.5), int(W/1.5))),
-                    transforms.Resize(self.in_shape)
-                ])
-                img = transform(img).unsqueeze(0)
-                img2 = transform(img2).unsqueeze(0)
+                # img = cv2.imread("3DAmodal/front_full_0000_rgb.jpg")
+                # img2 = cv2.imread("3DAmodal/front_full_0063_rgb.jpg")
+                # H, W, C = img.shape # for ASD: [1080, 1920, 3]
+                # transform = transforms.Compose([
+                #     transforms.ToTensor(),
+                #     transforms.ConvertImageDtype(torch.float),
+                #     transforms.RandomCrop((int(H/1.5), int(W/1.5))),
+                #     transforms.Resize(self.in_shape)
+                # ])
+                # img = transform(img).unsqueeze(0)
+                # img2 = transform(img2).unsqueeze(0)
 
-                imgs = torch.cat((img, img2), dim=0)
-                gt_amod_masks = torch.ones((1, 1, 540, 960))
-                gt_occl_masks = torch.ones((1, 1, 540, 960))
-                gt_vis_masks = torch.ones((5, 3, 540, 960))
-                gt_vis_masks = gt_vis_masks[:,0,:,:] # has three channels, but they're all the same
-                gt_invis_masks = gt_amod_masks - gt_vis_masks
+                # imgs = torch.cat((img, img2), dim=0)
+                # gt_amod_masks = torch.ones((1, 1, 540, 960))
+                # gt_occl_masks = torch.ones((1, 1, 540, 960))
+                # gt_vis_masks = torch.ones((4, 3, 540, 960))
+                # gt_vis_masks = gt_vis_masks[:,0,:,:] # has three channels, but they're all the same
+                # gt_invis_masks = gt_amod_masks - gt_vis_masks
 
-                masks, rois = self.model(imgs) # [K, 4, 64, 64], [K, 5]
+                masks, rois = self.model(img_batch) # [K, 4, 64, 64], [K, 5]
                 rois = rois.to(torch.int)
                 K, num_masks, H_m, W_m = masks.shape
                 m_o = masks[:, 0]
@@ -152,7 +218,12 @@ class Trainer():
                 m_a = masks[:, 2]
                 m_i = masks[:, 3]
 
+
+
                 # 3) calculate the loss
+                # 3.1) assign predicted masks to gt masks using IOU matrix and Hungarian algorithm
+
+
                 total_loss = 0
                 # for i in range()
                 for ins in range(K):

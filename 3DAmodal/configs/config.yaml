@@ -39,8 +39,8 @@ ABLATION: False
 MASK_RATIO: 0.95
 RANDOM_SEED: 42
 DATASET: 
-    NAME: datasets.KINS_dataset:KINS # datasets.asd_dataset:AmodalSynthDriveDataset
-    TRAIN: /Midgard/Data/tibbe/datasets/KINS/ #/Midgard/Data/tibbe/datasets/AmodalSynthDrive/train
+    NAME: datasets.asd_dataset:AmodalSynthDriveDataset # datasets.KINS_dataset:KINS
+    TRAIN: /Midgard/Data/tibbe/datasets/AmodalSynthDrive/train # /Midgard/Data/tibbe/datasets/KINS/
     #/local_storage/users/tibbe/datasets/AmodalSynthDrive/train/
     TEST: /local_storage/users/tibbe/datasets/AmodalSynthDrive/test/
 AUGMENTATION:   # Proably hard coded

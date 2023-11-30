@@ -1,8 +1,7 @@
 import pdb
 import numpy as np
 import torch
-from utils import limit_period, iou2d_nearest
-
+from ..utils import limit_period, iou2d_nearest
 
 class Anchors():
     def __init__(self, ranges, sizes, rotations):

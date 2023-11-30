@@ -107,7 +107,7 @@ def collate_fn_lidar(list_data):
 def collate_fn_mask(list_data):
     pass
 
-def get_lidar_dataloader(dataset, batch_size, num_workers, partition="lidar", shuffle=True, drop_last=False):
+def get_dataloader(dataset, batch_size, num_workers, partition="lidar", shuffle=True, drop_last=False):
     if partition=="lidar":
         collate = collate_fn_lidar
     elif partition=="image":

@@ -3,9 +3,9 @@ import pdb
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from model.anchors import Anchors, anchor_target, anchors2bboxes
-from ops import Voxelization, nms_cuda
-from utils import limit_period
+from ..model.anchors import Anchors, anchor_target, anchors2bboxes
+from ..ops import Voxelization, nms_cuda
+from ..utils import limit_period
 
 
 class PillarLayer(nn.Module):

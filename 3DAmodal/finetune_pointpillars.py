@@ -1,10 +1,8 @@
 import torch
-import torchvision.transforms as transforms
-from torch.utils.data import DataLoader
-from asd_dataset import AmodalSynthDriveDataset
+from datasets.asd_dataset import AmodalSynthDriveDataset
 import numpy as np
-from dataset.dataloader import get_dataloader
-from model import PointPillars
+from datasets.dataloader import get_dataloader
+from pointpillars.model import PointPillars
 
 class PointPillars_FT(torch.nn.Module):
     def __init__(self, num_classes):
@@ -12,7 +10,7 @@ class PointPillars_FT(torch.nn.Module):
         self.pointpillars = PointPillars()
         if torch.cuda.is_available():
             self.pointpillars = self.pointpillars.cuda()
-        self.pointpillars.load_state_dict(torch.load("/home/jule-magnus/dd2414/3damodal/3DAmodal/PointPillars/pretrained/epoch_160.pth"))
+        self.pointpillars.load_state_dict(torch.load("/home/jule-magnus/dd2414/3damodal/3DAmodal/model_checkpoints/epoch_160.pth"))
         #adapt the final layer
         self.final_layer = torch.nn.Linear(num_classes, num_classes)
 
@@ -44,6 +42,7 @@ if __name__ == "__main__":
         train_dataset,
         batch_size=batch_size,
         num_workers=4,
+        partition="lidar",
         shuffle=True
     )
 

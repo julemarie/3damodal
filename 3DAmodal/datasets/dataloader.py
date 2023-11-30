@@ -103,9 +103,52 @@ def collate_fn_lidar(list_data):
 
     return rt_data_dict
 
+def get_gt_masks_asd(anns):
+        gt_vis_masks = [ann[0] for ann in anns]
+        gt_vis_masks = torch.stack(gt_vis_masks) # [4, 3, 540, 960]
+        gt_amod_masks = []
+        gt_invis_masks = []
+        gt_occl_masks = []
+        for i, ann in enumerate(anns):
+            for key in ann[1].keys():
+                if not ann[key]['occlusion_mask'] == []:
+                    occl_mask = ann[key]['occlusion_mask']
+                    im_id = i*torch.ones(occl_mask.shape)
+                    occl_mask = torch.stack((occl_mask,im_id))
+                    gt_occl_masks.append(occl_mask)
+                    amod_mask = ann[key]['amodal_mask']
+                    amod_mask = torch.stack((amod_mask,im_id))
+                    gt_amod_masks.append(amod_mask)
+                    invis_mask = amod_mask[0] - gt_vis_masks[i,0]
+                    invis_mask[invis_mask<0] = 0
+                    invis_mask = torch.stack((invis_mask,im_id))
+                    gt_invis_masks.append(invis_mask)
+        
+        gt_amod_masks = torch.stack(gt_amod_masks) # [K_gt, 2, 540, 960]
+        gt_occl_masks = torch.stack(gt_occl_masks) # [K_gt, 2, 540, 960]
+        gt_invis_masks = torch.stack(gt_invis_masks) # [K_gt, 2, 540, 960]
+
+        masks_dict = {"visible": gt_vis_masks,
+                      "amodal": gt_amod_masks,
+                      "occluder": gt_occl_masks,
+                      "invisible": gt_invis_masks}
+
+        return masks_dict
+
 
 def collate_fn_mask(list_data):
-    pass
+    mask_dict_list = []
+    img_batch = torch.zeros((len(list_data), 5, 3, 540, 960))
+    for i, (X, Y) in enumerate(list_data):
+        img_batch[i] = X['imgs']
+
+        masks = [Y[key] for key in Y.keys()[1:]] # list of lists
+
+        masks_dict = get_gt_masks_asd(masks)
+        mask_dict_list.append(masks_dict)
+
+    return img_batch, mask_dict_list
+
 
 def get_lidar_dataloader(dataset, batch_size, num_workers, partition="lidar", shuffle=True, drop_last=False):
     if partition=="lidar":

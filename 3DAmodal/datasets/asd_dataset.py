@@ -66,14 +66,14 @@ class AmodalSynthDriveDataset(Dataset):
                 "points": lidar["points"],
                 "transform": np.array(lidar["transform"]),
                 "horizontal_angle": lidar["horizontal_angle"]
-            }
+            },
+            "imgs": imgs
         }
         Y = {
             "lidar": lidar["labels"].astype(np.int32)
         }
 
         for i, view in enumerate(self.img_settings):
-            X[view] = imgs[i]
             if view == "bev_full_":
                 continue
             annos = [aminseg_anno[i][aminseg] for aminseg in aminseg_anno[i]]

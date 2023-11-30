@@ -57,31 +57,31 @@ class AmodalSynthDriveDataset(Dataset):
         assert setting_name in os.listdir(os.path.join(self.data_root, "lidar")), "Folder {} not in directory {}.".format(setting_name, os.path.join(self.data_root, "lidar"))
 
         imgs = self.get_imgs(setting_name, str_id)
-        # bboxes = self.get_bboxes(setting_name, str_id)
+        bboxes = self.get_bboxes(setting_name, str_id)
         aminseg_anno = self.get_amodal_instance_annos(setting_name, str_id)
-        # lidar = self.get_lidar(setting_name, str_id)
+        lidar = self.get_lidar(setting_name, str_id)
 
-        # X = {
-        #     "lidar": {
-        #         "points": lidar["points"],
-        #         "transform": np.array(lidar["transform"]),
-        #         "horizontal_angle": lidar["horizontal_angle"]
-        #     }
-        # }
-        # Y = {
-        #     "lidar": lidar["labels"].astype(np.int32)
-        # }
+        X = {
+            "lidar": {
+                "points": lidar["points"],
+                "transform": np.array(lidar["transform"]),
+                "horizontal_angle": lidar["horizontal_angle"]
+            }
+        }
+        Y = {
+            "lidar": lidar["labels"].astype(np.int32)
+        }
 
-        # for i, view in enumerate(self.img_settings):
-        #     X[view] = imgs[i]
-        #     if view == "bev_full_":
-        #         continue
-        #     annos = [aminseg_anno[i][aminseg] for aminseg in aminseg_anno[i]]
-        #     for anno in annos:
-        #         anno["bbox"] = np.array(bboxes[anno["track_id"]])
-        #     Y[view] = annos
+        for i, view in enumerate(self.img_settings):
+            X[view] = imgs[i]
+            if view == "bev_full_":
+                continue
+            annos = [aminseg_anno[i][aminseg] for aminseg in aminseg_anno[i]]
+            for anno in annos[1:]:
+                anno["bbox"] = np.array(bboxes[anno["track_id"]])
+            Y[view] = annos
 
-        return imgs, aminseg_anno
+        return X, Y
 
 
     def map_to_folder(self, index):
@@ -123,6 +123,7 @@ class AmodalSynthDriveDataset(Dataset):
             for key in anno: # iterating over the annotations of the instances
                 img_annos[anno[key]["track_id"]] = {
                     "category_id": anno[key]["category_id"],
+                    "track_id": anno[key]["track_id"],
                     "occlusion_mask": [],
                     "amodal_mask": []
                 }

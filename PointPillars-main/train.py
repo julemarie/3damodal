@@ -10,6 +10,8 @@ from model import PointPillars
 from loss import Loss
 from torch.utils.tensorboard import SummaryWriter
 
+from asd_dataset import AmodalSynthDriveDataset
+
 
 def save_summary(writer, loss_dict, global_step, tag, lr=None, momentum=None):
     for k, v in loss_dict.items():
@@ -22,10 +24,12 @@ def save_summary(writer, loss_dict, global_step, tag, lr=None, momentum=None):
 
 def main(args):
     setup_seed()
-    train_dataset = Kitti(data_root=args.data_root,
-                          split='train')
-    val_dataset = Kitti(data_root=args.data_root,
-                        split='val')
+    #train_dataset = Kitti(data_root=args.data_root,
+    #                      split='train')
+    #val_dataset = Kitti(data_root=args.data_root,
+    #                    split='val')
+    train_dataset = AmodalSynthDriveDataset(args.data_root + '/train')
+    val_dataset = AmodalSynthDriveDataset(args.data_root + '/val')
     train_dataloader = get_dataloader(dataset=train_dataset, 
                                       batch_size=args.batch_size, 
                                       num_workers=args.num_workers,
@@ -35,10 +39,8 @@ def main(args):
                                     num_workers=args.num_workers,
                                     shuffle=False)
 
-    if not args.no_cuda:
-        pointpillars = PointPillars(nclasses=args.nclasses).cuda()
-    else:
-        pointpillars = PointPillars(nclasses=args.nclasses)
+    pointpillars = PointPillars(nclasses=args.nclasses).cuda()
+
     loss_func = Loss()
 
     max_iters = len(train_dataloader) * args.max_epoch
@@ -66,19 +68,27 @@ def main(args):
         print('=' * 20, epoch, '=' * 20)
         train_step, val_step = 0, 0
         for i, data_dict in enumerate(tqdm(train_dataloader)):
-            if not args.no_cuda:
-                # move the tensors to the cuda
-                for key in data_dict:
-                    for j, item in enumerate(data_dict[key]):
-                        if torch.is_tensor(item):
-                            data_dict[key][j] = data_dict[key][j].cuda()
-            
+            # move the tensors to the cuda
+            for key in data_dict:
+                for j, item in enumerate(data_dict[key]):
+                    if torch.is_tensor(item):
+                        data_dict[key][j] = data_dict[key][j].cuda()
+        
             optimizer.zero_grad()
 
             batched_pts = data_dict['batched_pts']
             batched_gt_bboxes = data_dict['batched_gt_bboxes']
             batched_labels = data_dict['batched_labels']
-            batched_difficulty = data_dict['batched_difficulty']
+            #batched_difficulty = data_dict['batched_difficulty']
+            #inputs, labels = data_dict
+            #batched_pts = inputs["lidar"]["points"] 
+            #batched_gt_bboxes = []
+            #for setting in ["front_full_", "back_full_", "right_full_", "left_full_"]:
+            #    for anno in inputs[setting]:
+            #        bbox = anno["bbox"]
+            #        if bbox not in batched_gt_bboxes:
+            #            batched_gt_bboxes.append(bbox)
+            #batched_labels = labels["lidar"] 
             bbox_cls_pred, bbox_pred, bbox_dir_cls_pred, anchor_target_dict = \
                 pointpillars(batched_pts=batched_pts, 
                              mode='train',
@@ -149,7 +159,15 @@ def main(args):
                 batched_pts = data_dict['batched_pts']
                 batched_gt_bboxes = data_dict['batched_gt_bboxes']
                 batched_labels = data_dict['batched_labels']
-                batched_difficulty = data_dict['batched_difficulty']
+                #inputs, labels = data_dict
+                #batched_pts = inputs["lidar"]["points"] 
+                #batched_gt_bboxes = []
+                #for setting in ["front_full_", "back_full_", "right_full_", "left_full_"]:
+                #    for anno in inputs[setting]:
+                #        bbox = anno["bbox"]
+                #        if bbox not in batched_gt_bboxes:
+                #            batched_gt_bboxes.append(bbox)
+                #batched_labels = labels["lidar"] 
                 bbox_cls_pred, bbox_pred, bbox_dir_cls_pred, anchor_target_dict = \
                     pointpillars(batched_pts=batched_pts, 
                                 mode='train',
@@ -197,19 +215,59 @@ def main(args):
 
 
 if __name__ == '__main__':
+    CLASSES = {
+        'unlabeled': 0,
+        'ego vehicle': 1,
+        'rectification border': 2,
+        'out of roi': 3,
+        'static': 4,
+        'dynamic': 5,
+        'ground': 6,
+        'road': 7,
+        'sidewalk': 8,
+        'parking': 9,
+        'rail track': 10,
+        'building': 11,
+        'wall': 12,
+        'fence': 13,
+        'guard rail': 14,
+        'bridge': 15,
+        'tunnel': 16,
+        'polegroup': 17,
+        'pole': 18,
+        'traffic light': 19,
+        'traffic sign': 20,
+        'vegetation': 21,
+        'terrain': 22,
+        'sky': 23,
+        'person': 24,
+        'rider': 25,
+        'car': 26,
+        'truck': 27,
+        'bus': 28,
+        'caravan': 29,
+        'trailer': 30,
+        'train': 31,
+        'motor': 32,
+        'bike': 33,
+        'license plate': -1,
+        'road line': 34,
+        'other': 35,
+        'water': 36
+        }
+
     parser = argparse.ArgumentParser(description='Configuration Parameters')
-    parser.add_argument('--data_root', default='/mnt/ssd1/lifa_rdata/det/kitti', 
+    parser.add_argument('--data_root', default='/home/jule-magnus/dd2414/Data/AmodalSynthDrive', 
                         help='your data root for kitti')
     parser.add_argument('--saved_path', default='pillar_logs')
-    parser.add_argument('--batch_size', type=int, default=6)
+    parser.add_argument('--batch_size', type=int, default=2)
     parser.add_argument('--num_workers', type=int, default=4)
-    parser.add_argument('--nclasses', type=int, default=3)
-    parser.add_argument('--init_lr', type=float, default=0.00025)
+    parser.add_argument('--nclasses', type=int, default=38)
+    parser.add_argument('--init_lr', type=float, default=2*(10**-4))
     parser.add_argument('--max_epoch', type=int, default=160)
     parser.add_argument('--log_freq', type=int, default=8)
     parser.add_argument('--ckpt_freq_epoch', type=int, default=20)
-    parser.add_argument('--no_cuda', action='store_true',
-                        help='whether to use cuda')
+
     args = parser.parse_args()
 
     main(args)

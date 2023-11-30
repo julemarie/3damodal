@@ -88,7 +88,7 @@ class PillarEncoder(nn.Module):
 
         # 5. embedding
         features = features.permute(0, 2, 1).contiguous() # (p1 + p2 + ... + pb, 9, num_points)
-        features = F.relu(self.bn(self.conv(features)))  # (p1 + p2 + ... + pb, out_channels, num_points)
+        features = F.relu(self.bn(self.conv(features.cuda())))  # (p1 + p2 + ... + pb, out_channels, num_points)
         pooling_features = torch.max(features, dim=-1)[0] # (p1 + p2 + ... + pb, out_channels)
 
         # 6. pillar scatter
@@ -96,7 +96,7 @@ class PillarEncoder(nn.Module):
         bs = coors_batch[-1, 0] + 1
         for i in range(bs):
             cur_coors_idx = coors_batch[:, 0] == i
-            cur_coors = coors_batch[cur_coors_idx, :]
+            cur_coors = coors_batch[cur_coors_idx, :].cuda()
             cur_features = pooling_features[cur_coors_idx]
 
             canvas = torch.zeros((self.x_l, self.y_l, self.out_channel), dtype=torch.float32, device=device)
@@ -207,7 +207,7 @@ class Head(nn.Module):
         '''
         x: (bs, 384, 248, 216)
         return: 
-              bbox_cls_pred: (bs, n_anchors*3, 248, 216) 
+              bbox_cls_pred: (bs, n_anchors*n_classes, 248, 216) # not n_anchors *3...
               bbox_pred: (bs, n_anchors*7, 248, 216)
               bbox_dir_cls_pred: (bs, n_anchors*2, 248, 216)
         '''
@@ -267,7 +267,7 @@ class PointPillars(nn.Module):
 
     def get_predicted_bboxes_single(self, bbox_cls_pred, bbox_pred, bbox_dir_cls_pred, anchors):
         '''
-        bbox_cls_pred: (n_anchors*3, 248, 216) 
+        bbox_cls_pred: (n_anchors*n_classes, 248, 216) # not n_anchors * 3 for more than 3 classes
         bbox_pred: (n_anchors*7, 248, 216)
         bbox_dir_cls_pred: (n_anchors*2, 248, 216)
         anchors: (y_l, x_l, 3, 2, 7)
@@ -402,6 +402,11 @@ class PointPillars(nn.Module):
         anchors = self.anchors_generator.get_multi_anchors(feature_map_size)
         batched_anchors = [anchors for _ in range(batch_size)]
 
+        ### upsample bboxes for AISFormer
+        #use points in bboxes 3 to get points in bbox
+        # upsample points in bboxes for each bbox
+        # return for AIS former torch.nn.Upsample
+
         if mode == 'train':
             anchor_target_dict = anchor_target(batched_anchors=batched_anchors, 
                                                batched_gt_bboxes=batched_gt_bboxes, 
@@ -425,3 +430,4 @@ class PointPillars(nn.Module):
             return results
         else:
             raise ValueError   
+

@@ -637,6 +637,20 @@ def points_in_bboxes_v2(points, r0_rect, tr_velo_to_cam, dimensions, location, r
     return indices, n_total_bbox, n_valid_bbox, bboxes_lidar, name
 
 
+def points_in_bboxes_v3(points, bboxes_corners):
+    '''
+    points: shape=(N, 4) 
+    bboxes_corners: shape=(n, 8)
+    return:
+        mask: shape=(N, n_valid_bbox), indices[i, j] denotes whether point i is in bbox j. 
+    '''
+    group_rectangle_vertexs_v = group_rectangle_vertexs(bboxes_corners)
+    frustum_surfaces = group_plane_equation(group_rectangle_vertexs_v)
+    mask = points_in_bboxes(points[:, :3], frustum_surfaces) # (N, n), N is points num, n is bboxes number
+    return mask
+
+
+
 def get_points_num_in_bbox(points, r0_rect, tr_velo_to_cam, dimensions, location, rotation_y, name):
     '''
     points: shape=(N, 4) 

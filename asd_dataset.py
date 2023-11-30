@@ -91,13 +91,3 @@ class AmodalSynthDriveDataset(Dataset):
         with open(lidar_path, "rb") as lf:
             lidar = pickle.load(lf)
         return lidar
-    
-
-
-if __name__ == "__main__":
-    ds = AmodalSynthDriveDataset("/home/jule-magnus/dd2414/Data/AmodalSynthDrive/train")
-    dl = DataLoader(ds)
-    for dp, l in dl:
-        print(dp.keys(), l.keys())
-        break
-

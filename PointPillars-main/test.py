@@ -8,7 +8,8 @@ import pdb
 from utils import setup_seed, read_points, read_calib, read_label, \
     keep_bbox_from_image_range, keep_bbox_from_lidar_range, vis_pc, \
     vis_img_3d, bbox3d2corners_camera, points_camera2image, \
-    bbox_camera2lidar
+    bbox_camera2lidar, read_pickle
+
 from model import PointPillars
 
 
@@ -27,12 +28,50 @@ def point_range_filter(pts, point_range=[0, -39.68, -3, 69.12, 39.68, 1]):
     pts = pts[keep_mask]
     return pts 
 
+def read_pkl_points(pkl_path, dim=4):
+    data = read_pickle(pkl_path)
+    return data['points'].reshape(-1, dim)
 
 def main(args):
     CLASSES = {
-        'Pedestrian': 0, 
-        'Cyclist': 1, 
-        'Car': 2
+        'unlabeled': 0,
+        'ego vehicle': 1,
+        'rectification border': 2,
+        'out of roi': 3,
+        'static': 4,
+        'dynamic': 5,
+        'ground': 6,
+        'road': 7,
+        'sidewalk': 8,
+        'parking': 9,
+        'rail track': 10,
+        'building': 11,
+        'wall': 12,
+        'fence': 13,
+        'guard rail': 14,
+        'bridge': 15,
+        'tunnel': 16,
+        'polegroup': 17,
+        'pole': 18,
+        'traffic light': 19,
+        'traffic sign': 20,
+        'vegetation': 21,
+        'terrain': 22,
+        'sky': 23,
+        'person': 24,
+        'rider': 25,
+        'car': 26,
+        'truck': 27,
+        'bus': 28,
+        'caravan': 29,
+        'trailer': 30,
+        'train': 31,
+        'motor': 32,
+        'bike': 33,
+        'license plate': -1,
+        'road line': 34,
+        'other': 35,
+        'water': 36
         }
     LABEL2CLASSES = {v:k for k, v in CLASSES.items()}
     pcd_limit_range = np.array([0, -40, -3, 70.4, 40, 0.0], dtype=np.float32)
@@ -47,7 +86,10 @@ def main(args):
     
     if not os.path.exists(args.pc_path):
         raise FileNotFoundError 
-    pc = read_points(args.pc_path)
+    if os.path.splitext(args.pc_path)[1] == '.pkl':
+        pc = read_pkl_points(args.pc_path, dim=3)
+    else:
+        pc = read_points(args.pc_path)    
     pc = point_range_filter(pc)
     pc_torch = torch.from_numpy(pc)
     if os.path.exists(args.calib_path):

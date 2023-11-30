@@ -3,47 +3,6 @@ import torch
 from torch.utils.data import DataLoader
 from itertools import combinations
 
-# AmodalSynthDrive classes
-CLASSES = {
-        'unlabeled': 0,
-        'ego vehicle': 1,
-        'rectification border': 2,
-        'out of roi': 3,
-        'static': 4,
-        'dynamic': 5,
-        'ground': 6,
-        'road': 7,
-        'sidewalk': 8,
-        'parking': 9,
-        'rail track': 10,
-        'building': 11,
-        'wall': 12,
-        'fence': 13,
-        'guard rail': 14,
-        'bridge': 15,
-        'tunnel': 16,
-        'polegroup': 17,
-        'pole': 18,
-        'traffic light': 19,
-        'traffic sign': 20,
-        'vegetation': 21,
-        'terrain': 22,
-        'sky': 23,
-        'person': 24,
-        'rider': 25,
-        'car': 26,
-        'truck': 27,
-        'bus': 28,
-        'caravan': 29,
-        'trailer': 30,
-        'train': 31,
-        'motor': 32,
-        'bike': 33,
-        'license plate': -1,
-        'road line': 34,
-        'other': 35,
-        'water': 36
-        }
 
 def bbox_corners_to_xyzwhltheta(bbox):
     combs = list(combinations(bbox[:,:3], 2))

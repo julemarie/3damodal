@@ -7,21 +7,77 @@ import pickle
 import json
 import cv2 as cv
 from pycocotools import mask as coco_mask
-# from pycocotools import coco
 
 FRAMES_PER_SETTING = 100
 
-# def custom_collate_fn(batch):
-#     # 'batch' is a list of dictionaries where each dictionary has keys corresponding to views (e.g., 'front_full_', 'lidar')
+# AmodalSynthDrive classes
+NUM_ALL_CLASSES = 38
+ALL_CLASSES = {
+        'unlabeled': 0,
+        'ego vehicle': 1,
+        'rectification border': 2,
+        'out of roi': 3,
+        'static': 4,
+        'dynamic': 5,
+        'ground': 6,
+        'road': 7,
+        'sidewalk': 8,
+        'parking': 9,
+        'rail track': 10,
+        'building': 11,
+        'wall': 12,
+        'fence': 13,
+        'guard rail': 14,
+        'bridge': 15,
+        'tunnel': 16,
+        'polegroup': 17,
+        'pole': 18,
+        'traffic light': 19,
+        'traffic sign': 20,
+        'vegetation': 21,
+        'terrain': 22,
+        'sky': 23,
+        'person': 24,
+        'rider': 25,
+        'car': 26,
+        'truck': 27,
+        'bus': 28,
+        'caravan': 29,
+        'trailer': 30,
+        'train': 31,
+        'motor': 32,
+        'bike': 33,
+        'license plate': -1,
+        'road line': 34,
+        'other': 35,
+        'water': 36
+        }
 
-#     # Separate the batch into lists of dictionaries for X and Y
-#     X_batch, Y_batch = zip(*batch)
+NUM_CLASSES = 9
+INSTANCE_CLASSES = {
+    'person':24 ,
+    'rider':25 ,
+    'car':26 ,
+    'truck':27 ,
+    'bus':28 ,
+    'caravan':29 ,
+    'trailer':30 ,
+    'motor':32 ,
+    'bike':33
+}
 
-#     # Combine dictionaries in X_batch and Y_batch into a single dictionary for each
-#     X_collated = {key: torch.stack([sample[key] for sample in X_batch]) for key in X_batch[0]}
-#     Y_collated = {key: torch.stack([sample[key] for sample in Y_batch]) for key in Y_batch[0]}
+CLASS_MAPPING = {
+    24: 0,
+    25: 1,
+    26: 2,
+    27: 3,
+    28: 4,
+    29: 5,
+    30: 6,
+    32: 7,
+    33: 8
+}
 
-#     return X_collated, Y_collated
 
 class AmodalSynthDriveDataset(Dataset):
     def __init__(self, data_root, transform=None):
@@ -70,7 +126,7 @@ class AmodalSynthDriveDataset(Dataset):
             "imgs": imgs
         }
         Y = {
-            "lidar": lidar["labels"].astype(np.int32)
+            "lidar": np.array([CLASS_MAPPING[l]  if l in CLASS_MAPPING.keys() else -1 for l in lidar["labels"]], dtype=np.float32)
         }
 
         for i, view in enumerate(self.img_settings):
@@ -122,15 +178,12 @@ class AmodalSynthDriveDataset(Dataset):
             img_annos = {"visible_mask": []}
             for key in anno: # iterating over the annotations of the instances
                 img_annos[anno[key]["track_id"]] = {
-                    "category_id": anno[key]["category_id"],
+                    "category_id": CLASS_MAPPING[anno[key]["category_id"]] if anno[key]["category_id"] in CLASS_MAPPING.keys() else -1,
                     "track_id": anno[key]["track_id"],
                     "occlusion_mask": [],
                     "amodal_mask": []
                 }
                 if anno[key]["occluded"]:
-                    # anno[key]["occlusion_mask"]["counts"] = anno[key]["occlusion_mask"]["counts"]
-                    # anno[key]["amodal_mask"]["counts"] = anno[key]["amodal_mask"]["counts"]
-                    # print(anno[key]["amodal_mask"])
                     occl_mask = coco_mask.decode(anno[key]["occlusion_mask"])
                     amod_mask = coco_mask.decode(anno[key]["amodal_mask"])
                     
@@ -145,10 +198,6 @@ class AmodalSynthDriveDataset(Dataset):
             
         assert len(masks_dict_list) == len(self.img_settings) - 1, "The dictionary does not have the right size!"
 
-            # ann_mask = {"coco_annotation": anno,
-            #      "visible_mask": mask}
-            # masks_dict_list.append(ann_mask)
-            
         return masks_dict_list
     
     def get_lidar(self, setting_name, str_id):
@@ -160,62 +209,11 @@ class AmodalSynthDriveDataset(Dataset):
 
 
 if __name__ == "__main__":
-    ds = AmodalSynthDriveDataset("/Midgard/Data/tibbe/datasets/AmodalSynthDrive/train")
+    #ds = AmodalSynthDriveDataset("/Midgard/Data/tibbe/datasets/AmodalSynthDrive/train")
+    ds = AmodalSynthDriveDataset("/home/jule-magnus/dd2414/Data/AmodalSynthDrive/train")
     views = ds.img_settings
     dl = DataLoader(ds, batch_size=1)
     for amodl_anns in dl:
-        print(type(amodl_anns))
-        # print(amodl_anns.keys())
+        print(amodl_anns["front_full_"])
+        break
 
-
-        
-    #     masks_dict = {}
-    #     img_masks = {}
-    #     for i, ann in  enumerate(amodl_anns): # iterating over the annotations of the loaded images
-    #         ann_dict = ann["coco_annotation"]
-    #         vis_mask = ann["visible_mask"]
-    #         bin_occl_masks = []
-    #         bin_amod_masks = []
-    #         img_masks["visible_mask"] = vis_mask
-    #         for key in ann_dict: # iterating over the annotations of the instances
-    #             inst_mask = {ann_dict[key]["track_id"]: {
-    #                 "occlusion_mask": None,
-    #                 "amodal_mask": None
-    #             }}
-    #             if ann_dict[key]["occluded"]:
-    #                 ann_dict[key]["occlusion_mask"]["counts"] = ann_dict[key]["occlusion_mask"]["counts"][0]
-    #                 ann_dict[key]["amodal_mask"]["counts"] = ann_dict[key]["amodal_mask"]["counts"][0]
-    #                 print(ann_dict[key]["amodal_mask"])
-    #                 occl_mask = coco_mask.decode(ann_dict[key]["occlusion_mask"])
-    #                 amod_mask = coco_mask.decode(ann_dict[key]["amodal_mask"])
-
-    #                 bin_occl_mask = torch.tensor(occl_mask, dtype=torch.float).unsqueeze(0)
-    #                 bin_amod_mask = torch.tensor(amod_mask, dtype=torch.float).unsqueeze(0)
-
-    #                 inst_mask[ann_dict[key]["track_id"]]["occlusion_mask"] = torch.tensor(occl_mask, dtype=torch.float).unsqueeze(0)
-    #                 inst_mask[ann_dict[key]["track_id"]]["amodal_mask"] = torch.tensor(amod_mask, dtype=torch.float).unsqueeze(0)
-
-    #                 img_masks["other_masks"] = inst_mask
-
-    #         masks_dict[views[i]] = img_masks
-    #     break
-
-
-    # [{
-    #     "visible_mask": "MASK",
-    #     "other_masks": {
-    #         "track_id": {
-    #             "category_id": "ID",
-    #             "occlusion_mask": "MASK",
-    #             "amodal_mask": "MASK"},
-    #         "track_id": {
-    #             "category_id": "ID",
-    #             "occlusion_mask": "MASK",
-    #             "amodal_mask": "MASK"},
-    #         "track_id": {
-    #             "category_id": "ID",
-    #             "occlusion_mask": "MASK",
-    #             "amodal_mask": "MASK"}
-    #       }
-    #    },
-    # ]

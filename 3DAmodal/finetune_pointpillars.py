@@ -10,7 +10,7 @@ class PointPillars_FT(torch.nn.Module):
         self.pointpillars = PointPillars()
         if torch.cuda.is_available():
             self.pointpillars = self.pointpillars.cuda()
-        self.pointpillars.load_state_dict(torch.load("/home/jule-magnus/dd2414/3damodal/3DAmodal/model_checkpoints/epoch_160.pth"))
+        self.pointpillars.load_state_dict(torch.load("/home/jule-magnus/dd2414/3damodal/3DAmodal/model_checkpoints/pretrained_pointpillars_epoch_160.pth"))
         #adapt the final layer
         self.final_layer = torch.nn.Linear(num_classes, num_classes)
 

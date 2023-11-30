@@ -71,7 +71,7 @@ def retrieve_gt_bboxes(data):
     seen_ids = []
     gt_bboxes = []
     for setting in settings:
-        for anno in data[setting]:
+        for anno in data[setting][1:]:
             bbox = anno["bbox"]
             if anno["track_id"] not in seen_ids:
                 seen_ids.append(anno["track_id"])

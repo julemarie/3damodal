@@ -1,0 +1,44 @@
+# Model stuff
+MODEL_NAME: 3DAmodalFormer
+MODEL_CLASS: model:3DAmodalFormer
+MODEL:
+    WEIGHTS: "../checkpoints/"
+    BACKBONE: "fasterrcnn_resnet50_fpn" #hardcoded for now
+    PARAMS:
+        INPUT_H: 540
+        INPUT_W: 960
+        IN_CHANS : 3
+        ROI_OUT_SIZE: 32
+        Q_DIM: 3
+        EMBED_DIM : 3
+        ENCODER_DEPTH : 1
+        ENCODER_HIDDEN_DIM : 1
+        ENCODER_NUM_HEADS : 3
+        DECODER_EMBED_DIM : 3
+        DECODER_DEPTH : 1
+        DECODER_HIDDEN_DIM : 1
+        DECODER_NUM_HEADS : 3
+# Training params
+OPTIMIZER: SGD # Hard coded rn
+OPTIMIZER_MOMENTUM:
+    BETA1: 0.9
+    BETA2: 0.95
+WEIGHT_DECAY: 5.0e-2 
+BASE_LEARNING_RATE: 1.0e-3
+LEARNING_RATE: 2.5e-3
+MIN_LEARNING_RATE: 0.0
+LEARNING_RATE_SCHEDULER: cosine decay # Hard coded rn
+WARMUP_EPOCHS: 40
+EPOCHS: 5
+CHECK_VAL_EVERY_N_EPOCH: 1
+RANDOM_SEED: 42
+DATASET: 
+    NAME: datasets.asd_dataset:AmodalSynthDriveDataset # datasets.KINS_dataset:KINS
+    TRAIN: /local_storage/users/tibbe/datasets/AmodalSynthDrive/train/ # /Midgard/Data/tibbe/datasets/KINS/
+    # /Midgard/Data/tibbe/datasets/AmodalSynthDrive/train
+    TEST: /local_storage/users/tibbe/datasets/AmodalSynthDrive/test/
+BATCH_SIZE: 1
+OUTPUT_DIR:
+    TRAINING: "./outputs/training/"
+    TESTING: "./outputs/testing/"
+DEVICE: 'cpu'

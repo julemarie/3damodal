@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 from itertools import combinations
 
 
@@ -69,13 +70,13 @@ def get_gt_masks_asd(anns):
         gt_invis_masks = []
         gt_occl_masks = []
         for i, ann in enumerate(anns):
-            for key in ann[1].keys():
-                if not ann[key]['occlusion_mask'] == []:
-                    occl_mask = ann[key]['occlusion_mask']
+            for j, m_dict in enumerate(ann[1:]):
+                if not m_dict['occlusion_mask'] == []:
+                    occl_mask = m_dict['occlusion_mask']
                     im_id = i*torch.ones(occl_mask.shape)
                     occl_mask = torch.stack((occl_mask,im_id))
                     gt_occl_masks.append(occl_mask)
-                    amod_mask = ann[key]['amodal_mask']
+                    amod_mask = m_dict['amodal_mask']
                     amod_mask = torch.stack((amod_mask,im_id))
                     gt_amod_masks.append(amod_mask)
                     invis_mask = amod_mask[0] - gt_vis_masks[i,0]
@@ -96,32 +97,60 @@ def get_gt_masks_asd(anns):
 
 
 def collate_fn_mask(list_data):
+    print("DATALOADER")
     mask_dict_list = []
     img_batch = torch.zeros((len(list_data), 5, 3, 540, 960))
     for i, (X, Y) in enumerate(list_data):
         img_batch[i] = X['imgs']
 
-        masks = [Y[key] for key in Y.keys()[1:]] # list of lists
+        masks = [Y[key] for key in list(Y.keys())[1:]] # list of lists
 
         masks_dict = get_gt_masks_asd(masks)
         mask_dict_list.append(masks_dict)
 
+    # assert gpu_id < num_devices, "GPU ID cannot be larger than number of devices"
+
+    # only return the image of the view coresponding to the gpu_id
+    if torch.cuda.is_available():
+        gpu_id = torch.cuda.current_device()
+        num_devices = torch.cuda.device_count()
+        img_batch = img_batch[:,gpu_id%num_devices]
+        mask_dict_list = [mask_dict_list[gpu_id%num_devices]]
+    
+
     return img_batch, mask_dict_list
 
 
-def get_dataloader(dataset, batch_size, num_workers, partition="lidar", shuffle=True, drop_last=False):
+def get_dataloader(dataset, batch_size, partition="lidar", num_workers=0, shuffle=True, drop_last=False, distributed=False):
+    global NUM_DEVICES, GPU_ID
+    
     if partition=="lidar":
         collate = collate_fn_lidar
     elif partition=="image":
-        collate = collate_fn_mask
+        if distributed:
+            collate = collate_fn_mask
+        else:
+            collate = collate_fn_mask
     else:
         raise ValueError
-    dataloader = DataLoader(
-        dataset=dataset,
-        batch_size=batch_size,
-        shuffle=shuffle,
-        num_workers=num_workers,
-        drop_last=drop_last, 
-        collate_fn=collate,
-    )
+    if distributed:
+        dataloader = DataLoader(
+            dataset=dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            drop_last=drop_last, 
+            collate_fn=collate,
+            timeout=50
+            # sampler=DistributedSampler(dataset)
+        )
+    else:
+        dataloader = DataLoader(
+            dataset=dataset,
+            batch_size=batch_size,
+            shuffle=shuffle,
+            num_workers=num_workers,
+            drop_last=drop_last, 
+            collate_fn=collate,
+        )
     return dataloader

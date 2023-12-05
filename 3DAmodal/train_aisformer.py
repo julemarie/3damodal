@@ -1,6 +1,9 @@
 from aisformer import AISFormer
-from datasets.asd_dataset import AmodalSynthDriveDataset
-from datasets.KINS_dataset import KINS
+# from datasets.asd_dataset import AmodalSynthDriveDataset
+# from datasets.KINS_dataset import KINS
+import sys
+sys.path.append('/Midgard/home/tibbe/3damodal/3DAmodal/datasets')
+from dataloader import get_dataloader
 from utils import get_obj_from_str
 
 from pycocotools import mask as coco_mask
@@ -15,23 +18,48 @@ from torch.utils.data import DataLoader
 from torchvision.utils import save_image
 from scipy.optimize import linear_sum_assignment
 
+# distributed training
+import torch.multiprocessing as mp
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.distributed import init_process_group, destroy_process_group
+import os
+ 
+
+def ddp_setup(rank, world_size):
+    """
+    Args:
+        rank: uique identifier of each process
+        world_size: total number of processes
+    """
+    # master is in charge of communication between the different processes
+    os.environ['MASTER_ADDR'] = "localhost"
+    os.environ['MASTER_PORT'] = "12355"
+
+    # nccl: nvidia collective communications library -> distr. communication across cuda gpus
+    init_process_group(backend="nccl", rank=rank, world_size=world_size)
+    torch.cuda.set_device(rank)
+
 
 class Trainer():
-    def __init__(self, cfg_path="/Midgard/home/tibbe/3damodal/3DAmodal/configs/config.yaml", try_cuda=True, train=True):
-        self.cfg = OmegaConf.load(cfg_path)
+    def __init__(self, gpu_id, cfg, train=True):
+        self.gpu_id = gpu_id
+        self.cfg = cfg
         self.in_shape = tuple((self.cfg.MODEL.PARAMS.INPUT_H, self.cfg.MODEL.PARAMS.INPUT_W))
 
-        if self.cfg.DEVICE == 'cuda':
-            self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        else:
-            self.device = 'cpu'
+        # if self.cfg.DEVICE == 'cuda':
+        #     self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        # else:
+        #     self.device = 'cpu'
+
+        self.save_interval = self.cfg.SAVE_INTERVAL
         
         # init model and move it to device
         self.model = AISFormer(self.in_shape, self.cfg)
         self.model.train()
         self.model.backbone.eval()
-        self.model.to(self.device)
-
+        self.model.to(self.gpu_id)
+        self.model = DDP(self.model, device_ids=[self.gpu_id])
+        
         # init dataloader
         if train:
             data_root = self.cfg.DATASET.TRAIN
@@ -40,7 +68,7 @@ class Trainer():
         else:
             raise NotImplementedError
 
-        self.dataloader = DataLoader(dataset, batch_size=self.cfg.BATCH_SIZE, shuffle=True)
+        self.dataloader = get_dataloader(dataset, batch_size=10, num_workers=5, partition="image", distributed=self.cfg.DISTRIBUTED)
 
         # self.resize = transforms.Resize((64, 64))
         self.roi_size = tuple((self.cfg.MODEL.PARAMS.ROI_OUT_SIZE*2, self.cfg.MODEL.PARAMS.ROI_OUT_SIZE*2))
@@ -49,11 +77,13 @@ class Trainer():
 
         self.epochs = self.cfg.EPOCHS
 
-        self.viewstr2int = {"front_full": 0,
-                            "back_full": 1,
-                            "left_full": 2,
-                            "righ_full": 3,
-                            "bev_full": 4}
+        
+
+        # self.viewstr2int = {"front_full": 0,
+        #                     "back_full": 1,
+        #                     "left_full": 2,
+        #                     "righ_full": 3,
+        #                     "bev_full": 4}
 
 
     def crop_and_resize_mask(self, mask, roi):
@@ -122,35 +152,6 @@ class Trainer():
 
         return inmodal_masks, seg_masks
     
-    def get_gt_masks_asd(self, anns):
-        gt_vis_masks = [ann['visible_mask'].squeeze(0) for ann in anns]
-        gt_vis_masks = torch.stack(gt_vis_masks) # [4, 3, 540, 960]
-        gt_amod_masks = []
-        gt_invis_masks = []
-        gt_occl_masks = []
-        for i, ann in enumerate(anns):
-            for key in ann.keys():
-                if key == 'visible_mask':
-                    continue
-                if not ann[key]['occlusion_mask'] == []:
-                    occl_mask = ann[key]['occlusion_mask'].squeeze()
-                    im_id = i*torch.ones(occl_mask.shape)
-                    occl_mask = torch.stack((occl_mask,im_id))
-                    gt_occl_masks.append(occl_mask)
-                    amod_mask = ann[key]['amodal_mask'].squeeze()
-                    amod_mask = torch.stack((amod_mask,im_id))
-                    gt_amod_masks.append(amod_mask)
-                    invis_mask = amod_mask[0] - gt_vis_masks[i,0]
-                    invis_mask[invis_mask<0] = 0
-                    invis_mask = torch.stack((invis_mask,im_id))
-                    gt_invis_masks.append(invis_mask)
-        
-        gt_amod_masks = torch.stack(gt_amod_masks) # [K_gt, 2, 540, 960]
-        gt_occl_masks = torch.stack(gt_occl_masks) # [K_gt, 2, 540, 960]
-        gt_invis_masks = torch.stack(gt_invis_masks) # [K_gt, 2, 540, 960]
-
-        return gt_vis_masks, gt_amod_masks, gt_occl_masks, gt_invis_masks
-    
     def calculate_IOU(self, mask1, mask2):
         """
             Calculate IOU between two given masks.
@@ -216,7 +217,7 @@ class Trainer():
         loss = 0
         for i, j in assignment.items():
             if j == 'fp': # if false positive
-                zero_mask = torch.zeros((pred_masks[i].shape), device=self.device)
+                zero_mask = torch.zeros((pred_masks[i].shape), device=self.gpu_id)
                 loss += self.compute_loss(pred_masks[i], zero_mask)
             else:
                 gt_mask = self.crop_and_resize_mask(gt_masks[j, 1], bbs[i])
@@ -240,27 +241,30 @@ class Trainer():
         return loss
 
     def train(self):
-        print("Starting training...")
+        print("Starting training on GPU:{}...".format(self.gpu_id))
+        print(torch.cuda.current_device())
         # clear gpu memory
-        torch.cuda.empty_cache()
+        # torch.cuda.empty_cache()
         for epoch_idx in tqdm(range(self.epochs)):
             # for data, anns in self.dataloader:
             for img_batch, anns in self.dataloader:
+                print("Loaded se data")
                 # 1) Extract masks from annotations
-                gt_vis_masks, gt_amod_masks, gt_occl_masks, gt_invis_masks = self.get_gt_masks_asd(anns)
-                gt_vis_masks = gt_vis_masks.to(self.device)
-                gt_amod_masks = gt_amod_masks.to(self.device)
-                gt_occl_masks = gt_occl_masks.to(self.device)
-                gt_invis_masks = gt_invis_masks.to(self.device)
+                gt_vis_masks, gt_amod_masks, gt_occl_masks, gt_invis_masks = anns[0]['visible'], anns[0]['amodal'], anns[0]['occluder'], anns[0]['invisible']
+                gt_vis_masks = gt_vis_masks.to(self.gpu_id)
+                gt_amod_masks = gt_amod_masks.to(self.gpu_id)
+                gt_occl_masks = gt_occl_masks.to(self.gpu_id)
+                gt_invis_masks = gt_invis_masks.to(self.gpu_id)
                 # img_batch size: [B, 5, 3, 540, 960]
                 img_batch = img_batch[:,:4] # we don't care about the BEV image here
                 B, V, C, H, W = img_batch.shape
+                print(img_batch.shape)
                 img_batch = img_batch.reshape((B*V, C, H, W))
-                img_batch = img_batch.to(self.device)
+                img_batch = img_batch.to(self.gpu_id)
                 
                 # 2) pass images through model (output will be the four masks)
                 masks, rois = self.model(img_batch) # [K, 4, 64, 64], [K, 5]
-                torch.cuda.empty_cache()
+                # torch.cuda.empty_cache()
                 rois = rois.to(torch.int).to('cpu')
                 K, num_masks, H_m, W_m = masks.shape
                 m_o = masks[:, 0]
@@ -284,7 +288,7 @@ class Trainer():
                 # 3.3) accumulate the losses
                 total_loss = loss_o + loss_a + loss_i + loss_v
 
-                torch.cuda.empty_cache()
+                # torch.cuda.empty_cache()
 
                 # 4) update the weights (for this we need to define an optimizer -> check paper)
                 self.optimizer.zero_grad()
@@ -293,7 +297,7 @@ class Trainer():
                 print("BACHWARD DONE")
                 self.optimizer.step()
 
-                torch.cuda.empty_cache()
+                # torch.cuda.empty_cache()
 
                 # 5) start training and save masks, feature tensors, and attention maps for visualisation (check paper what they used)
 
@@ -301,10 +305,16 @@ class Trainer():
 
 
 
-def main():
-    trainer = Trainer()
+def main(rank: int, world_size: int, cfg: OmegaConf):
+    ddp_setup(rank, world_size)
+    trainer = Trainer(gpu_id=rank, cfg=cfg)
     trainer.train()
+    destroy_process_group()
 
 
 if __name__ == "__main__":
-    main()
+    cfg_path="/Midgard/home/tibbe/3damodal/3DAmodal/configs/config.yaml"
+    cfg = OmegaConf.load(cfg_path)
+    world_size = torch.cuda.device_count()
+
+    mp.spawn(main, args=(world_size, cfg), nprocs=world_size)

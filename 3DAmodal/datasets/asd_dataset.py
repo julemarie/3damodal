@@ -2,6 +2,7 @@ import torch
 from torchvision import transforms
 import numpy as np
 from torch.utils.data import Dataset, DataLoader
+from dataloader import get_dataloader
 import os
 import pickle
 import json
@@ -209,11 +210,13 @@ class AmodalSynthDriveDataset(Dataset):
 
 
 if __name__ == "__main__":
-    #ds = AmodalSynthDriveDataset("/Midgard/Data/tibbe/datasets/AmodalSynthDrive/train")
-    ds = AmodalSynthDriveDataset("/home/jule-magnus/dd2414/Data/AmodalSynthDrive/train")
+    ds = AmodalSynthDriveDataset("/Midgard/Data/tibbe/datasets/AmodalSynthDrive/train")
+    # ds = AmodalSynthDriveDataset("/home/jule-magnus/dd2414/Data/AmodalSynthDrive/train")
     views = ds.img_settings
-    dl = DataLoader(ds, batch_size=1)
-    for amodl_anns in dl:
-        print(amodl_anns["front_full_"])
-        break
+    dl = get_dataloader(ds, batch_size=3, partition="image")
+
+    for X, Y in dl:
+        print(X.shape)
+        print(len(Y))
+        
 

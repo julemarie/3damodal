@@ -3,6 +3,8 @@ import torch
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from itertools import combinations
+import datasets.KINS_dataset
+import datasets.asd_dataset
 
 
 def bbox_corners_to_xyzwhltheta(bbox):
@@ -120,6 +122,16 @@ def collate_fn_mask(list_data):
 
     return img_batch, mask_dict_list
 
+def collate_fn_image_kins(list_data):
+    anns_dict_list = []
+    img_batch = torch.zeros_like(list_data[0][0]).unsqueeze(0).repeat((len(list_data), 1, 1, 1))
+    # img_batch = torch.zeros((len(list_data), 3, 540, 960))
+    for i, (X, Y) in enumerate(list_data):
+        img_batch[i] = X
+        anns_dict_list.append(Y)
+    
+    return img_batch, anns_dict_list
+
 
 def get_dataloader(dataset, batch_size, partition="lidar", num_workers=0, shuffle=True, drop_last=False, distributed=False):
     global NUM_DEVICES, GPU_ID
@@ -127,9 +139,9 @@ def get_dataloader(dataset, batch_size, partition="lidar", num_workers=0, shuffl
     if partition=="lidar":
         collate = collate_fn_lidar
     elif partition=="image":
-        if distributed:
-            collate = collate_fn_mask
-        else:
+        if isinstance(dataset, datasets.KINS_dataset.KINS):
+            collate = collate_fn_image_kins
+        elif isinstance(dataset, datasets.asd_dataset.AmodalSynthDriveDataset):
             collate = collate_fn_mask
     else:
         raise ValueError
@@ -154,3 +166,13 @@ def get_dataloader(dataset, batch_size, partition="lidar", num_workers=0, shuffl
             collate_fn=collate,
         )
     return dataloader
+
+
+if __name__ == "__main__":
+    kins_dataset = KINS()
+    dl = get_dataloader(kins_dataset, batch_size=1, partition="image")
+
+    for X, Y in dl:
+        print(X.shape)
+        print(Y)
+        break

@@ -5,6 +5,7 @@ import sys
 sys.path.append('/Midgard/home/tibbe/3damodal/3DAmodal/datasets')
 from dataloader import get_dataloader
 from utils import get_obj_from_str
+import datasets.KINS_dataset
 
 from pycocotools import mask as coco_mask
 from omegaconf import OmegaConf
@@ -42,7 +43,7 @@ def ddp_setup(rank, world_size):
 
 class Trainer():
     def __init__(self, gpu_id, cfg, train=True):
-        self.gpu_id = gpu_id
+        self.gpu_id = 'cpu' if gpu_id == -1 else 'cuda:{}'.format(gpu_id)
         self.cfg = cfg
         self.in_shape = tuple((self.cfg.MODEL.PARAMS.INPUT_H, self.cfg.MODEL.PARAMS.INPUT_W))
 
@@ -58,7 +59,8 @@ class Trainer():
         self.model.train()
         self.model.backbone.eval()
         self.model.to(self.gpu_id)
-        self.model = DDP(self.model, device_ids=[self.gpu_id])
+        if self.cfg.DISTRIBUTED:
+            self.model = DDP(self.model, device_ids=[self.gpu_id])
         
         # init dataloader
         if train:
@@ -68,7 +70,7 @@ class Trainer():
         else:
             raise NotImplementedError
 
-        self.dataloader = get_dataloader(dataset, batch_size=10, num_workers=5, partition="image", distributed=self.cfg.DISTRIBUTED)
+        self.dataloader = get_dataloader(dataset, batch_size=1, num_workers=5, partition="image", distributed=self.cfg.DISTRIBUTED)
 
         # self.resize = transforms.Resize((64, 64))
         self.roi_size = tuple((self.cfg.MODEL.PARAMS.ROI_OUT_SIZE*2, self.cfg.MODEL.PARAMS.ROI_OUT_SIZE*2))
@@ -76,6 +78,9 @@ class Trainer():
         self.optimizer = torch.optim.SGD(self.model.parameters(), lr=self.cfg.LEARNING_RATE)
 
         self.epochs = self.cfg.EPOCHS
+
+        if isinstance(dataset, datasets.KINS_dataset.KINS):
+            self.mask_tf = transforms.Resize((250,828))
 
         
 
@@ -94,10 +99,21 @@ class Trainer():
                 mask: Tensor [H, W]
                 roi: Tensor [5]
         """
-        _, y_min, x_min, y_max, x_max = roi
-        cropped_mask = mask[x_min:x_max, y_min:y_max]
-        resized_mask = cropped_mask.resize_(self.roi_size)
-        # resized_mask = self.resize(cropped_mask)
+        x1, y1, x2, y2 = roi[1], roi[2], roi[3], roi[4]
+        # draw bounding box on mask
+        pil_mask = Image.fromarray(mask.numpy())
+        ImageDraw.Draw(pil_mask).rectangle([x1, y1, x2, y2], outline=255)
+        mask_w_bb = torch.tensor(np.array(pil_mask), dtype=torch.float).unsqueeze(0)
+        save_image(mask_w_bb, "test_maskwbb.png")
+        # crop
+        cropped_mask = mask[y1:y2, x1:x2].unsqueeze(0)
+        save_image(cropped_mask, "test_crop.png")
+        # resize
+        resized_mask = transforms.Resize(self.roi_size)(cropped_mask)
+        save_image(resized_mask, "test_resizecrop.png")
+
+        resized_mask = resized_mask.squeeze(0)
+
         return resized_mask
     
 
@@ -120,7 +136,7 @@ class Trainer():
         # mask = Image.new('L', (width, height), 0)
         
         for j ,poly in enumerate(polys):
-            poly = [[poly[i].item(), poly[i+1].item()] for i in range(0, len(poly), 2)]
+            poly = [[poly[i], poly[i+1]] for i in range(0, len(poly), 2)]
             poly = np.array(poly, np.int32)
             poly = poly.reshape((-1, 1, 2))
             cv2.fillPoly(mask, [poly], color=(255, 255, 255), lineType=cv2.LINE_AA)
@@ -129,28 +145,84 @@ class Trainer():
         return mask
 
 
-    def get_masks_kins(self, anns):
-        anns['amodal_full']['counts'] = anns['amodal_full']['counts'][0]
+    def __get_mask_kins(self, ann):
+        ann['amodal_full']['counts'] = ann['amodal_full']['counts']
         # 1) fetch necessary data from data and anns
-        h, w = anns['img_height'], anns['img_width']
-        amodal_mask = self.decode_mask_rle(anns['amodal_full'])
+        h, w = ann['img_height'], ann['img_width']
+        amodal_mask = self.decode_mask_rle(ann['amodal_full'])
         seg_masks = []
         inmodal_masks = []
-        for key in anns.keys():
+        for key in ann.keys():
             if key == "amodal_full" or key == "img_height" or key == "img_width":
                 continue
-            segmentation = self.decode_mask_lst(anns[key]['segmentation'], h, w)
-            anns[key]['inmodal_seg']['counts'] = anns[key]['inmodal_seg']['counts'][0]
-            inmodal_seg = self.decode_mask_rle(anns[key]['inmodal_seg'])
+            segmentation = self.decode_mask_lst(ann[key]['segmentation'], h, w)
+            ann[key]['inmodal_seg']['counts'] = ann[key]['inmodal_seg']['counts']
+            inmodal_seg = self.decode_mask_rle(ann[key]['inmodal_seg'])
             inmodal_masks.append(inmodal_seg)
             seg_masks.append(segmentation)
-            save_image(inmodal_seg, "test_seg.png")
         seg_masks = torch.stack(seg_masks)
         inmodal_masks = torch.stack(inmodal_masks)
+        amodal_mask = self.mask_tf(amodal_mask)
+        seg_masks = self.mask_tf(seg_masks)
+        inmodal_masks = self.mask_tf(inmodal_masks)
+        save_image(inmodal_seg[0], "test_inmod.png")
+        save_image(amodal_mask, "test_amod.png")
+        save_image(segmentation[0], "test_seg.png")
         # combined_seg = torch.einsum('nchw->chw', seg_masks)
         # combined_inmodal = torch.einsum('nchw->chw', inmodal_masks)
 
-        return inmodal_masks, seg_masks
+        return inmodal_masks, seg_masks, amodal_mask
+    
+    def get_masks_kins(self, anns):
+        inmodal_masks_all = []
+        seg_masks_all = []
+        amodal_masks_all = []
+        for ann in anns:
+            inmodal_masks, seg_masks, amodal_mask = self.__get_mask_kins(ann)
+            inmodal_masks_all.append(inmodal_masks)
+            seg_masks_all.append(seg_masks)
+            amodal_masks_all.append(amodal_mask)
+
+        return inmodal_masks_all, seg_masks_all, amodal_masks_all
+    
+    def __get_mask_kins2020(self, ann):
+        # 1) fetch necessary data from data and anns
+        h, w = ann['img_height'], ann['img_width']
+        amodal_masks = []
+        inmodal_masks = []
+        all_amodal = torch.zeros((1, h, w))
+        all_inmodal = torch.zeros((1, h, w))
+        for key in ann.keys():
+            if key == "img_height" or key == "img_width":
+                continue
+            amodal_mask = self.decode_mask_lst(ann[key]['a_segm'], h, w)
+            inmodal_mask = self.decode_mask_lst(ann[key]['i_segm'], h, w)
+            inmodal_masks.append(inmodal_mask)
+            amodal_masks.append(amodal_mask)
+            all_amodal += amodal_mask
+            all_inmodal += inmodal_mask
+        amodal_masks = torch.stack(amodal_masks)
+        inmodal_masks = torch.stack(inmodal_masks)
+        amodal_masks = self.mask_tf(amodal_masks)
+        inmodal_masks = self.mask_tf(inmodal_masks)
+        
+        # for i in range(amodal_masks.shape[0]):
+        #     save_image(amodal_masks[i], "test_amod_{}.png".format(i))
+        #     save_image(inmodal_masks[i], "test_inmod_{}.png".format(i))
+        # combined_seg = torch.einsum('nchw->chw', seg_masks)
+        # combined_inmodal = torch.einsum('nchw->chw', inmodal_masks)
+
+        return inmodal_masks, amodal_masks
+    
+    def get_masks_kins2020(self, anns):
+        inmodal_masks_all = []
+        amodal_masks_all = []
+        for ann in anns:
+            inmodal_masks, amodal_masks = self.__get_mask_kins2020(ann)
+            inmodal_masks_all.append(inmodal_masks)
+            amodal_masks_all.append(amodal_masks)
+
+        return inmodal_masks_all, amodal_masks_all
     
     def calculate_IOU(self, mask1, mask2):
         """
@@ -166,7 +238,7 @@ class Trainer():
             Calculate IOU matrix between prediction masks and GT masks.
             Input:
                 pred_masks: Tensor [K, 1, 64, 64]
-                gt_masks: Tensor [K_gt, 2, 540, 960]
+                gt_masks: Tensor [K_gt, 1, 540, 960] (KINS: [250,  828])
                 bbs: Tensor [K, 5]
                 full_mask: bool (if True, shape of gt_masks: [4, 3, 540, 960])
             Output:
@@ -177,11 +249,11 @@ class Trainer():
         iou_matrix = torch.zeros((num_pred, num_gt))
         for i in range(num_pred):
             for j in range(num_gt):
-                if gt_masks[j, 1, 0, 0] == bbs[i, 0]: # check if gt mask is in same image as prediction
-                    gt_mask_roi = self.crop_and_resize_mask(gt_masks[j], bbs[i])
-                    iou_matrix[i, j] = self.calculate_IOU(pred_masks[i], gt_mask_roi)
-                else:
-                    iou_matrix[i, j] = 0.0
+                # if gt_masks[j, 1, 0, 0] == bbs[i, 0]: # check if gt mask is in same image as prediction
+                gt_mask_roi = self.crop_and_resize_mask(gt_masks[j,0], bbs[i])
+                iou_matrix[i, j] = self.calculate_IOU(pred_masks[i], gt_mask_roi)
+                # else:
+                #     iou_matrix[i, j] = 0.0
 
         return iou_matrix
     
@@ -211,7 +283,7 @@ class Trainer():
             Inputs:
                 assignment: dict (dict containing mapping between corresponding masks)
                 pred_masks: Tensor [K, 1, 64, 64]
-                gt_masks: Tensor [K_gt, 2, 540, 960]
+                gt_masks: Tensor [K_gt, 1, 540, 960] (KINS: [250, 828])
                 bbs: Tensor [K, 5]
         """
         loss = 0
@@ -220,7 +292,9 @@ class Trainer():
                 zero_mask = torch.zeros((pred_masks[i].shape), device=self.gpu_id)
                 loss += self.compute_loss(pred_masks[i], zero_mask)
             else:
-                gt_mask = self.crop_and_resize_mask(gt_masks[j, 1], bbs[i])
+                gt_mask = self.crop_and_resize_mask(gt_masks[j,0], bbs[i])
+                compare = torch.cat((pred_masks[i], gt_mask), dim=1).unsqueeze(0)
+                save_image(compare, "test_compare.png")
                 loss += self.compute_loss(pred_masks[i], gt_mask)
         return loss
     
@@ -302,14 +376,88 @@ class Trainer():
                 # 5) start training and save masks, feature tensors, and attention maps for visualisation (check paper what they used)
 
             print("Loss after epoch {}: {}".format(epoch_idx, total_loss))
+    
+    def train_kins(self):
+        print("Starting training on GPU:{}...".format(self.gpu_id))
+        # print(torch.cuda.current_device())
+        # clear gpu memory
+        # torch.cuda.empty_cache()
+        for epoch_idx in tqdm(range(self.epochs)):
+            # for data, anns in self.dataloader:
+            for img_batch, anns in tqdm(self.dataloader):
+                # 1) Extract masks from annotations
+                """
+                anns: list[dict]
+                dict: {inst: {Segmentation(polygons),
+                              Area,
+                              inmodal_seg({counts, size}),
+                              iscrowd,
+                              image_id,
+                              bbox,
+                              inmodal_bbox,
+                              catgory_id,
+                              id},
+                        amodal_full({counts, size}),
+                        img_height,
+                        img_width}
+                """
+                gt_inmodal_masks, gt_amodal_masks = self.get_masks_kins2020(anns)
+                gt_invis_masks = [a-i for a, i in zip(gt_amodal_masks, gt_inmodal_masks)]
 
+                # move gt masks to gpu
+                gt_inmodal_masks = [m.to(self.gpu_id) for m in gt_inmodal_masks]
+                gt_amodal_masks = [m.to(self.gpu_id) for m in gt_amodal_masks]
+                gt_invis_masks = [m.to(self.gpu_id) for m in gt_invis_masks]
 
+                # img_batch size: [B, 3, 540, 960] (ASD), [B, 3, 250, 828] (KINS)
+                img_batch = img_batch.to(self.gpu_id)
+                save_image(img_batch[0], "img_0.png")
+                
+                # 2) pass images through model (output will be the four masks)
+                masks, rois = self.model(img_batch) # [K, 4, 64, 64], [K, 5]
+                if masks is None:
+                    continue
+                # torch.cuda.empty_cache()
+                rois = rois.to(torch.int).to('cpu')
+                K, num_masks, H_m, W_m = masks.shape
+                m_o = masks[:, 0] # occluder mask (no gt in KINS)
+                m_v = masks[:, 1] # visible mask (inmodal)
+                m_a = masks[:, 2] # amodal mask
+                m_i = masks[:, 3] # invisible mask (amodal - inmodal)
+                
+                # 3) calculate the loss
+                # 3.1) assign predicted masks to gt masks using IOU matrix and Hungarian algorithm
+                assigned_masks_a = self.assign_iou(m_a, gt_amodal_masks[0], bbs=rois)
+                assigned_masks_v = self.assign_iou(m_i, gt_inmodal_masks[0], bbs=rois)
+                assigned_masks_i = self.assign_iou(m_i, gt_invis_masks[0], bbs=rois)
+
+                # 3.2) calculate the losses
+                # loss_o = self.compute_losses(assigned_masks_o, m_o, gt_occl_masks, bbs=rois)
+                loss_a = self.compute_losses(assigned_masks_a, m_a, gt_amodal_masks[0], bbs=rois)
+                loss_v = self.compute_losses(assigned_masks_v, m_v, gt_inmodal_masks[0], bbs=rois)
+                loss_i = self.compute_losses(assigned_masks_i, m_i, gt_invis_masks[0], bbs=rois)
+                
+                # 3.3) accumulate the losses
+                total_loss = loss_a + loss_v + loss_i
+
+                # torch.cuda.empty_cache()
+
+                # 4) update the weights (for this we need to define an optimizer -> check paper)
+                self.optimizer.zero_grad()
+                total_loss.backward()
+                self.optimizer.step()
+
+                # torch.cuda.empty_cache()
+
+                # 5) start training and save masks, feature tensors, and attention maps for visualisation (check paper what they used)
+
+            print("Loss after epoch {}: {}".format(epoch_idx, total_loss))
 
 def main(rank: int, world_size: int, cfg: OmegaConf):
-    ddp_setup(rank, world_size)
+    # ddp_setup(rank, world_size)
     trainer = Trainer(gpu_id=rank, cfg=cfg)
-    trainer.train()
-    destroy_process_group()
+    trainer.train_kins()
+    # destroy_process_group()
 
 
 if __name__ == "__main__":
@@ -317,4 +465,6 @@ if __name__ == "__main__":
     cfg = OmegaConf.load(cfg_path)
     world_size = torch.cuda.device_count()
 
-    mp.spawn(main, args=(world_size, cfg), nprocs=world_size)
+    main(-1, world_size, cfg)
+
+    # mp.spawn(main, args=(world_size, cfg), nprocs=world_size)

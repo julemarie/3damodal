@@ -13,22 +13,22 @@ class KINS(Dataset):
 
         self.root_dir = root_dir
         self.imgs_dir = os.path.join(self.root_dir, mode + "_imgs")
-        self.imgs_lst = os.listdir(self.imgs_dir)
+        self.imgs_lst = os.listdir(self.imgs_dir)[2:3]
 
         anns_dir = os.path.join(self.root_dir, "annotations")
-        with open(os.path.join(anns_dir, mode + ".json"), "r") as af:
+        with open(os.path.join(anns_dir, "update2020_"+mode + ".json"), "r") as af:
             self.anns_dict = json.load(af)
 
         if transform is None:
             self.transform = transforms.Compose([
                 transforms.ToTensor(),
-                transforms.Resize((540,960))
+                transforms.Resize((250,828)) # oriiginal size is (375, 1242)
             ])
         else:
             self.transform = transform
 
     def __len__(self):
-        return len(os.listdir(self.imgs_dir))
+        return len(self.imgs_lst)
 
     def get_annotations(self, image_id):
         anns = self.anns_dict['annotations']
@@ -54,7 +54,7 @@ class KINS(Dataset):
         img, img_dict = self.get_image(idx)
 
         anns_dict = self.get_annotations(img_dict['id'])
-        anns_dict['amodal_full'] = img_dict['amodal_full']
+        # anns_dict['amodal_full'] = img_dict['amodal_full']
         anns_dict['img_height'] = img_dict['height']
         anns_dict['img_width'] = img_dict['width']
         
@@ -64,11 +64,13 @@ class KINS(Dataset):
 
 def testing():
     kins_dataset = KINS()
+    print(isinstance(kins_dataset, KINS))
     dl = DataLoader(kins_dataset, batch_size=1)
     start = time.time()
     for img, anns in dl:
         print("TIME",time.time()-start)
         start = time.time()
+        break
 
 
 if __name__ == "__main__":

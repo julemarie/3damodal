@@ -92,7 +92,10 @@ class AISFormer(nn.Module):
             id = i*torch.ones((boxes.shape[0]), dtype=torch.int, device=self.device).unsqueeze(-1)
             roi_list.append(torch.cat((id, boxes), dim=1))
 
-        rois = torch.cat(roi_list, dim=0) # [K, 5] K: #bboxes, 5: first for id and last four for corners
+        if roi_list:
+            rois = torch.cat(roi_list, dim=0) # [K, 5] K: #bboxes, 5: first for id and last four for corners
+        else:
+            return None, roi_list
 
         f_roi2 = self.roi_align(imgs, rois) # [K, C, H_r, W_r]
         f_roi1 = self.conv(self.deconv(f_roi2)) # [K, C, H_r', W_r']

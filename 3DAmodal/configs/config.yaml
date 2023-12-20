@@ -8,7 +8,7 @@ MODEL:
         INPUT_H: 540
         INPUT_W: 960
         IN_CHANS : 3
-        ROI_OUT_SIZE: 32
+        ROI_OUT_SIZE: 16
         Q_DIM: 3
         EMBED_DIM : 3
         ENCODER_DEPTH : 1
@@ -32,16 +32,16 @@ EPOCHS: 5
 CHECK_VAL_EVERY_N_EPOCH: 1
 RANDOM_SEED: 42
 DATASET: 
-    NAME: datasets.asd_dataset:AmodalSynthDriveDataset # datasets.KINS_dataset:KINS
-    TRAIN: /local_storage/users/tibbe/datasets/AmodalSynthDrive/train/ # /Midgard/Data/tibbe/datasets/KINS/
+    NAME: datasets.KINS_dataset:KINS # datasets.asd_dataset:AmodalSynthDriveDataset
+    TRAIN: /Midgard/Data/tibbe/datasets/KINS/ # /local_storage/users/tibbe/datasets/AmodalSynthDrive/train/ 
     # /Midgard/Data/tibbe/datasets/AmodalSynthDrive/train
     TEST: /local_storage/users/tibbe/datasets/AmodalSynthDrive/test/
 BATCH_SIZE: 1
 OUTPUT_DIR:
     TRAINING: "./outputs/training/"
     TESTING: "./outputs/testing/"
-DEVICE: 'cpu'
-DISTRIBUTED: True
+DEVICE: 'cuda'
+DISTRIBUTED: False
     # ENABLE: True
     # NUM_DEVICES: 4
 SAVE_INTERVAL: 5

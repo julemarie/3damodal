@@ -13,7 +13,8 @@ class KINS(Dataset):
 
         self.root_dir = root_dir
         self.imgs_dir = os.path.join(self.root_dir, mode + "_imgs")
-        self.imgs_lst = os.listdir(self.imgs_dir)[2:3]
+        self.imgs_lst = os.listdir(self.imgs_dir)[2:3]*10
+
 
         anns_dir = os.path.join(self.root_dir, "annotations")
         with open(os.path.join(anns_dir, "update2020_"+mode + ".json"), "r") as af:

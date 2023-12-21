@@ -118,9 +118,9 @@ class Trainer():
     
 
     def compute_loss(self, pred_mask, gt_mask):
-        bce_loss = torch.nn.BCELoss()
-        return bce_loss(pred_mask, gt_mask)
-
+        # compute binnary cross entropy loss
+        loss = torch.nn.functional.binary_cross_entropy(pred_mask, gt_mask)
+        return loss
 
     def decode_mask_rle(self, mask_info):
         # Decode RLE-encoded mask
@@ -219,6 +219,16 @@ class Trainer():
         amodal_masks_all = []
         for ann in anns:
             inmodal_masks, amodal_masks = self.__get_mask_kins2020(ann)
+            # min max normalize between 0 and 1
+            inmodal_masks = inmodal_masks.view(inmodal_masks.shape[0]*inmodal_masks.shape[1], -1)
+            inmodal_masks -= inmodal_masks.min(1, keepdim=True)[0]
+            inmodal_masks /= inmodal_masks.max(1, keepdim=True)[0]
+            inmodal_masks = inmodal_masks.view(inmodal_masks.shape[0], 1, self.in_shape[0], self.in_shape[1])
+            amodal_masks = amodal_masks.view(amodal_masks.shape[0]*amodal_masks.shape[1], -1)
+            amodal_masks -= amodal_masks.min(1, keepdim=True)[0]
+            amodal_masks /= amodal_masks.max(1, keepdim=True)[0]
+            amodal_masks = amodal_masks.view(amodal_masks.shape[0], 1, self.in_shape[0], self.in_shape[1])
+            # amodal_masks = (amodal_masks - amodal_masks.min()) / (amodal_masks.max() - amodal_masks.min())            
             inmodal_masks_all.append(inmodal_masks)
             amodal_masks_all.append(amodal_masks)
 
@@ -228,6 +238,11 @@ class Trainer():
         """
             Calculate IOU between two given masks.
         """
+        # binarize masks
+        mask2[mask2 < 0.5] = 0
+        mask2[mask2 >= 0.5] = 1
+        save_image(mask1, "test_mask1_pred.png")
+        save_image(mask2, "test_mask2_gt.png")
         intersection = (mask1.int() & mask2.int()).float().sum((0,1))
         union = (mask1.int() | mask2.int()).float().sum((0,1))
         iou = (intersection + 1e-6) / (union + 1e-6)
@@ -251,7 +266,9 @@ class Trainer():
             for j in range(num_gt):
                 # if gt_masks[j, 1, 0, 0] == bbs[i, 0]: # check if gt mask is in same image as prediction
                 gt_mask_roi = self.crop_and_resize_mask(gt_masks[j,0], bbs[i])
+                # save_image(pred_masks[i], "test_pred.png")
                 iou_matrix[i, j] = self.calculate_IOU(pred_masks[i], gt_mask_roi)
+                # test =  self.calculate_IOU(gt_mask_roi, torch.ones_like(gt_mask_roi))
                 # else:
                 #     iou_matrix[i, j] = 0.0
 
@@ -293,7 +310,7 @@ class Trainer():
                 loss += self.compute_loss(pred_masks[i], zero_mask)
             else:
                 gt_mask = self.crop_and_resize_mask(gt_masks[j,0], bbs[i])
-                compare = torch.cat((pred_masks[i], gt_mask), dim=1).unsqueeze(0)
+                compare = torch.cat((pred_masks[i], gt_mask), dim=0).unsqueeze(0)
                 save_image(compare, "test_compare.png")
                 loss += self.compute_loss(pred_masks[i], gt_mask)
         return loss
@@ -428,7 +445,7 @@ class Trainer():
                 # 3) calculate the loss
                 # 3.1) assign predicted masks to gt masks using IOU matrix and Hungarian algorithm
                 assigned_masks_a = self.assign_iou(m_a, gt_amodal_masks[0], bbs=rois)
-                assigned_masks_v = self.assign_iou(m_i, gt_inmodal_masks[0], bbs=rois)
+                assigned_masks_v = self.assign_iou(m_v, gt_inmodal_masks[0], bbs=rois)
                 assigned_masks_i = self.assign_iou(m_i, gt_invis_masks[0], bbs=rois)
 
                 # 3.2) calculate the losses
@@ -444,8 +461,10 @@ class Trainer():
 
                 # 4) update the weights (for this we need to define an optimizer -> check paper)
                 self.optimizer.zero_grad()
+                print("BACKWARD")
                 total_loss.backward()
                 self.optimizer.step()
+                print("BACHWARD DONE")
 
                 # torch.cuda.empty_cache()
 

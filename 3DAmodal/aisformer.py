@@ -108,8 +108,12 @@ class AISFormer(nn.Module):
         I_i = I_i.unsqueeze(-1)
         roi_embed = self.unflatten(f_roi1.flatten(2) + f_e.permute(0,2,1)) # [K, C, H_m, W_m]
         masks = torch.tensordot(roi_embed, torch.cat((Q, I_i), dim=1), dims=([1], [0])).permute(0,3,1,2)
+        masks = masks.reshape(masks.shape[0]*masks.shape[1], -1)
         masks -= masks.min(1, keepdim=True)[0]
         masks /= masks.max(1, keepdim=True)[0]
+        masks = masks.reshape(rois.shape[0], 4, self.roi_out_size*2, self.roi_out_size*2)
+        masks[masks < 0.5] = 0
+        masks[masks >= 0.5] = 1
         return masks, rois # [K, 4, H_m, W_m]
 
 

@@ -8,7 +8,7 @@ MODEL:
         INPUT_H: 250 # 540
         INPUT_W: 828 # 960
         IN_CHANS : 3
-        ROI_OUT_SIZE: 16
+        ROI_OUT_SIZE: 32
         Q_DIM: 3
         EMBED_DIM : 3
         ENCODER_DEPTH : 1

@@ -6,6 +6,8 @@ sys.path.append('/Midgard/home/tibbe/3damodal/3DAmodal/datasets')
 from dataloader import get_dataloader
 from utils import get_obj_from_str
 import datasets.KINS_dataset
+from torchvision.ops import roi_align
+from torchvision.models.detection import fasterrcnn_resnet50_fpn
 
 from pycocotools import mask as coco_mask
 from omegaconf import OmegaConf
@@ -53,11 +55,17 @@ class Trainer():
         #     self.device = 'cpu'
 
         self.save_interval = self.cfg.SAVE_INTERVAL
+
+        self.backbone = fasterrcnn_resnet50_fpn(pretrained=True)
+        # params = self.backbone.state_dict()
+        # for name, param in self.backbone.state_dict().items():
+        #     print(name)
+        self.backbone.eval()
+        # ROIAlign takes images and ROIs as input and outputs a tensor of size [K, in_chans, (OUT_SIZE)] where K = #bboxes
+        # self.roi_align = RoIAlign(output_size=(self.cfg.MODEL.PARAMS.ROI_OUT_SIZE, self.cfg.MODEL.PARAMS.ROI_OUT_SIZE), spatial_scale=3, sampling_ratio=2,aligned=True)
         
         # init model and move it to device
         self.model = AISFormer(self.in_shape, self.cfg)
-        self.model.train()
-        self.model.backbone.eval()
         self.model.to(self.gpu_id)
         if self.cfg.DISTRIBUTED:
             self.model = DDP(self.model, device_ids=[self.gpu_id])
@@ -82,8 +90,6 @@ class Trainer():
         if isinstance(dataset, datasets.KINS_dataset.KINS):
             self.mask_tf = transforms.Resize((250,828))
 
-        
-
         # self.viewstr2int = {"front_full": 0,
         #                     "back_full": 1,
         #                     "left_full": 2,
@@ -101,10 +107,10 @@ class Trainer():
         """
         x1, y1, x2, y2 = roi[1], roi[2], roi[3], roi[4]
         # draw bounding box on mask
-        pil_mask = Image.fromarray(mask.numpy())
-        ImageDraw.Draw(pil_mask).rectangle([x1, y1, x2, y2], outline=255)
-        mask_w_bb = torch.tensor(np.array(pil_mask), dtype=torch.float).unsqueeze(0)
-        save_image(mask_w_bb, "test_maskwbb.png")
+        # pil_mask = Image.fromarray(mask.numpy())
+        # ImageDraw.Draw(pil_mask).rectangle([x1, y1, x2, y2], outline=255)
+        # mask_w_bb = torch.tensor(np.array(pil_mask), dtype=torch.float).unsqueeze(0)
+        # save_image(mask_w_bb, "test_maskwbb.png")
         # crop
         cropped_mask = mask[y1:y2, x1:x2].unsqueeze(0)
         save_image(cropped_mask, "test_crop.png")
@@ -120,6 +126,10 @@ class Trainer():
     def compute_loss(self, pred_mask, gt_mask):
         # compute binnary cross entropy loss
         loss = torch.nn.functional.binary_cross_entropy(pred_mask, gt_mask)
+        # compute dice loss
+        # intersection = (pred_mask.int() & gt_mask.int()).float().sum((0,1))
+        # union = (pred_mask.int() | gt_mask.int()).float().sum((0,1))
+        # loss = 1 - (2*intersection + 1e-6) / (union + 1e-6)                                    lm
         return loss
 
     def decode_mask_rle(self, mask_info):
@@ -310,8 +320,8 @@ class Trainer():
                 loss += self.compute_loss(pred_masks[i], zero_mask)
             else:
                 gt_mask = self.crop_and_resize_mask(gt_masks[j,0], bbs[i])
-                compare = torch.cat((pred_masks[i], gt_mask), dim=0).unsqueeze(0)
-                save_image(compare, "test_compare.png")
+                # compare = torch.cat((pred_masks[i], gt_mask), dim=0).unsqueeze(0)
+                # save_image(compare, "test_compare.png")
                 loss += self.compute_loss(pred_masks[i], gt_mask)
         return loss
     
@@ -395,6 +405,15 @@ class Trainer():
             print("Loss after epoch {}: {}".format(epoch_idx, total_loss))
     
     def train_kins(self):
+        self.model.train()
+        # model_dict = self.model.state_dict()
+        # for param, name in zip(self.model.parameters(), model_dict.keys()):
+        #     print("Before {}: {}".format(name, param.requires_grad))
+        #     param.requires_grad = True
+        #     print("After {}: {}".format(name, param.grad_fn))
+        # for param, name in zip(self.backbone.parameters(), self.backbone.state_dict().keys()):
+        #     print("{}: {}".format(name, param.requires_grad))
+        # model_dict = self.model.state_dict()
         print("Starting training on GPU:{}...".format(self.gpu_id))
         # print(torch.cuda.current_device())
         # clear gpu memory
@@ -429,11 +448,48 @@ class Trainer():
                 # img_batch size: [B, 3, 540, 960] (ASD), [B, 3, 250, 828] (KINS)
                 img_batch = img_batch.to(self.gpu_id)
                 save_image(img_batch[0], "img_0.png")
+
+                # self.optimizer.zero_grad()
                 
                 # 2) pass images through model (output will be the four masks)
-                masks, rois = self.model(img_batch) # [K, 4, 64, 64], [K, 5]
-                if masks is None:
+                thresh = 0.9
+                x = self.backbone(img_batch)
+                roi_list = []
+                for i, ann in enumerate(x):
+                    boxes = ann["boxes"][torch.where(ann["scores"] > thresh)]
+                    id = i*torch.ones((boxes.shape[0]), dtype=torch.int, device=self.gpu_id).unsqueeze(-1)
+                    roi_list.append(torch.cat((id, boxes), dim=1))
+
+                if roi_list:
+                    rois = torch.cat(roi_list, dim=0) # [K, 5] K: #bboxes, 5: first for id and last four for corners
+                else:
                     continue
+                
+                # draw bounding box on image
+                # img = img_batch[0].permute(1,2,0).cpu().numpy()
+                # img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+                # for roi in rois:
+                #     x1, y1, x2, y2 = roi[1].item(), roi[2].item(), roi[3].item(), roi[4].item()
+                #     start_point = (int(x1), int(y1))
+                #     end_point = (int(x2), int(y2))
+                #     color = (255, 0, 0)
+                #     thickness = 1
+                #     img = cv2.rectangle(img, start_point, end_point, color, thickness)
+                # img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                # img = transforms.ToTensor()(img)
+                # save_image(img, "img_2.png")
+
+                f_roi = roi_align(img_batch, rois, output_size=(self.cfg.MODEL.PARAMS.ROI_OUT_SIZE, self.cfg.MODEL.PARAMS.ROI_OUT_SIZE), spatial_scale=1, sampling_ratio=-1,aligned=True) # [K, C, H_r, W_r]
+                # normalize
+                # mean = [0.485, 0.456, 0.406]
+                # std = [0.229, 0.224, 0.225]
+                # f_roi = transforms.Normalize(mean, std)(f_roi)
+                save_image(f_roi[0], "img_1.png")
+                masks = self.model(f_roi) # [K, 4, 64, 64], [K, 5]
+                if masks is None:
+                    print("No masks")
+                    continue
+                
                 # torch.cuda.empty_cache()
                 rois = rois.to(torch.int).to('cpu')
                 K, num_masks, H_m, W_m = masks.shape
@@ -441,6 +497,9 @@ class Trainer():
                 m_v = masks[:, 1] # visible mask (inmodal)
                 m_a = masks[:, 2] # amodal mask
                 m_i = masks[:, 3] # invisible mask (amodal - inmodal)
+
+                save_image(m_v[0], "test_v.png")
+                save_image(m_v[1], "test_v1.png")
                 
                 # 3) calculate the loss
                 # 3.1) assign predicted masks to gt masks using IOU matrix and Hungarian algorithm
@@ -459,12 +518,13 @@ class Trainer():
 
                 # torch.cuda.empty_cache()
 
-                # 4) update the weights (for this we need to define an optimizer -> check paper)
+                # 4) backpropagate the loss
                 self.optimizer.zero_grad()
-                print("BACKWARD")
                 total_loss.backward()
+                # print gradients
+                for param in self.model.parameters():
+                    print(param.grad)
                 self.optimizer.step()
-                print("BACHWARD DONE")
 
                 # torch.cuda.empty_cache()
 

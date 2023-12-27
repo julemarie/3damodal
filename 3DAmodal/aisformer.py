@@ -39,10 +39,13 @@ class AISFormer(nn.Module):
             self.device = 'cpu'
 
         # output of backbone: list of dictionaries {boxes: tensor(4,num_boxes), labels: tensor(num_boxes), scores: tensor(num_boxes)}
-        self.backbone = fasterrcnn_resnet50_fpn(pretrained=True)
-        self.backbone.eval()
-        # ROIAlign takes images and ROIs as input and outputs a tensor of size [K, in_chans, (OUT_SIZE)] where K = #bboxes
-        self.roi_align = RoIAlign(output_size=(self.roi_out_size, self.roi_out_size), spatial_scale=1, sampling_ratio=2,aligned=True)
+        # self.backbone = fasterrcnn_resnet50_fpn(pretrained=True)
+        # params = self.backbone.state_dict()
+        # for name, param in self.backbone.state_dict().items():
+        #     print(name)
+        # self.backbone.eval()
+        # # ROIAlign takes images and ROIs as input and outputs a tensor of size [K, in_chans, (OUT_SIZE)] where K = #bboxes
+        # self.roi_align = RoIAlign(output_size=(self.roi_out_size, self.roi_out_size), spatial_scale=3, sampling_ratio=2,aligned=True)
         # deconvolution 
         self.deconv = nn.ConvTranspose2d(in_channels=self.in_chans, out_channels=self.in_chans, kernel_size=(2,2), stride=2)
         self.conv = nn.Conv2d(in_channels=self.in_chans, out_channels=self.in_chans, kernel_size=(1,1), stride=1)
@@ -54,6 +57,10 @@ class AISFormer(nn.Module):
             nn.Linear(self.embed_dim, self.embed_dim)
         ])
         self.unflatten = nn.Unflatten(2, (self.roi_out_size*2, self.roi_out_size*2))
+
+
+    def init_weights(self):
+        nn.init.kaiming_normal_(self.deconv.weight, mode='fan_out', nonlinearity='relu')
 
     def patchify(self, x):
         """
@@ -82,23 +89,23 @@ class AISFormer(nn.Module):
         imgs = x.reshape(shape=(x.shape[0], c, h * p, h * p))
         return imgs
         
-    def forward(self, imgs):
-        B, C, H, W = imgs.shape
-        thresh = 0.9
-        x = self.backbone(imgs)
-        roi_list = []
-        for i, ann in enumerate(x):
-            boxes = ann["boxes"][torch.where(ann["scores"] > thresh)]
-            id = i*torch.ones((boxes.shape[0]), dtype=torch.int, device=self.device).unsqueeze(-1)
-            roi_list.append(torch.cat((id, boxes), dim=1))
+    def forward(self, x):
+        B, C, H, W = x.shape
+        # thresh = 0.9
+        # x = self.backbone(imgs)
+        # roi_list = []
+        # for i, ann in enumerate(x):
+        #     boxes = ann["boxes"][torch.where(ann["scores"] > thresh)]
+        #     id = i*torch.ones((boxes.shape[0]), dtype=torch.int, device=self.device).unsqueeze(-1)
+        #     roi_list.append(torch.cat((id, boxes), dim=1))
 
-        if roi_list:
-            rois = torch.cat(roi_list, dim=0) # [K, 5] K: #bboxes, 5: first for id and last four for corners
-        else:
-            return None, roi_list
+        # if roi_list:
+        #     rois = torch.cat(roi_list, dim=0) # [K, 5] K: #bboxes, 5: first for id and last four for corners
+        # else:
+        #     return None, roi_list
 
-        f_roi2 = self.roi_align(imgs, rois) # [K, C, H_r, W_r]
-        f_roi1 = self.conv(self.deconv(f_roi2)) # [K, C, H_r', W_r']
+        # f_roi2 = self.roi_align(imgs, rois) # [K, C, H_r, W_r]
+        f_roi1 = self.conv(self.deconv(x)) # [K, C, H_r', W_r']
         f_e = self.encoder(f_roi1) # [K, H_m*W_m, C]
         Q = self.decoder(f_e) # [C, 3]
         Q_vis_am = torch.cat((Q[:,1], Q[:,2]), dim=0)
@@ -109,12 +116,12 @@ class AISFormer(nn.Module):
         roi_embed = self.unflatten(f_roi1.flatten(2) + f_e.permute(0,2,1)) # [K, C, H_m, W_m]
         masks = torch.tensordot(roi_embed, torch.cat((Q, I_i), dim=1), dims=([1], [0])).permute(0,3,1,2)
         masks = masks.reshape(masks.shape[0]*masks.shape[1], -1)
-        masks -= masks.min(1, keepdim=True)[0]
-        masks /= masks.max(1, keepdim=True)[0]
-        masks = masks.reshape(rois.shape[0], 4, self.roi_out_size*2, self.roi_out_size*2)
+        masks = masks - masks.min(1, keepdim=True)[0]
+        masks = masks/masks.max(1, keepdim=True)[0]
+        masks = masks.reshape(x.shape[0], 4, self.roi_out_size*2, self.roi_out_size*2)
         masks[masks < 0.5] = 0
         masks[masks >= 0.5] = 1
-        return masks, rois # [K, 4, H_m, W_m]
+        return masks # [K, 4, H_m, W_m]
 
 
 class Encoder(nn.Module):
@@ -187,8 +194,8 @@ if __name__ == "__main__":
 
     in_shape = tuple((cfg.MODEL.PARAMS.INPUT_H, cfg.MODEL.PARAMS.INPUT_W))
 
-    img = cv2.imread("front_full_0000_rgb.jpg")
-    img2 = cv2.imread("front_full_0063_rgb.jpg")
+    img = cv2.imread("3DAmodal/front_full_0000_rgb.jpg")
+    img2 = cv2.imread("3DAmodal/front_full_0063_rgb.jpg")
     H, W, C = img.shape # for ASD: [1080, 1920, 3]
     transform = transforms.Compose([
         transforms.ToTensor(),

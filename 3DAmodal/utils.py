@@ -5,7 +5,7 @@ import torch.nn.functional as F
 import math
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, inputq_dim, embed_dim, num_heads):
+    def __init__(self, input_dim, embed_dim, num_heads):
         super().__init__()
         assert embed_dim % num_heads == 0 # embed_dim has to be divisible by num_heads
         
@@ -13,10 +13,10 @@ class MultiHeadAttention(nn.Module):
         self.num_heads = num_heads
         self.proj_dim = embed_dim // num_heads
 
-        self.q = nn.Linear(inputq_dim, embed_dim)
-        self.kv = nn.Linear(embed_dim, 2*embed_dim)
+        self.q = nn.Linear(input_dim, embed_dim)
+        self.kv = nn.Linear(input_dim, 2*embed_dim)
 
-        self.out_proj = nn.Linear(embed_dim, inputq_dim)
+        self.out_proj = nn.Linear(embed_dim, input_dim)
 
         self._reset_parameters()
 

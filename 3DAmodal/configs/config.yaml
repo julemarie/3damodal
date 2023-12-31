@@ -8,16 +8,16 @@ MODEL:
         INPUT_H: 250 # 540
         INPUT_W: 828 # 960
         IN_CHANS : 3
-        ROI_OUT_SIZE: 32
+        ROI_OUT_SIZE: 28
         Q_DIM: 3
-        EMBED_DIM : 3
-        ENCODER_DEPTH : 1
+        EMBED_DIM : 256
+        ENCODER_DEPTH : 6
         ENCODER_HIDDEN_DIM : 1
-        ENCODER_NUM_HEADS : 3
-        DECODER_EMBED_DIM : 3
-        DECODER_DEPTH : 1
+        ENCODER_NUM_HEADS : 4
+        DECODER_EMBED_DIM : 256
+        DECODER_DEPTH : 6
         DECODER_HIDDEN_DIM : 1
-        DECODER_NUM_HEADS : 3
+        DECODER_NUM_HEADS : 4
 # Training params
 OPTIMIZER: SGD # Hard coded rn
 OPTIMIZER_MOMENTUM:

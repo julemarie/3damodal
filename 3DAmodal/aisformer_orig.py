@@ -155,9 +155,15 @@ if __name__ == "__main__":
                 nn.ConvTranspose2d(256, 256, kernel_size=(2, 2), stride=(2, 2)),
                 nn.ReLU()
             )
+    
+    conv_up = nn.Conv2d(3, 256, kernel_size=(1, 1), stride=(1, 1))
 
-    example_input = torch.randn(1, 256, 28, 28)
+    example_input = torch.randn(1, 3, 28, 28)
+    out = conv_up(example_input)
 
-    test_out = test_conv(example_input)
+
+    test_out = test_conv(out)
     test_out = deconv_for_TR(test_out)
     print(test_out.shape)
+
+    model = AISFormer()

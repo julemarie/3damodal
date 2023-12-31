@@ -7,6 +7,7 @@ from dataloader import get_dataloader
 from utils import get_obj_from_str
 import datasets.KINS_dataset
 from torchvision.ops import roi_align
+from torchvision.models import resnet50
 from torchvision.models.detection import fasterrcnn_resnet50_fpn
 
 from pycocotools import mask as coco_mask
@@ -16,6 +17,7 @@ import cv2
 from PIL import Image, ImageDraw
 import numpy as np
 import torch
+import torch.nn as nn
 from torchvision import transforms
 from torch.utils.data import DataLoader
 from torchvision.utils import save_image
@@ -45,6 +47,7 @@ def ddp_setup(rank, world_size):
 
 class Trainer():
     def __init__(self, gpu_id, cfg, train=True):
+        torch.autograd.set_detect_anomaly(True)
         self.gpu_id = 'cpu' if gpu_id == -1 else 'cuda:{}'.format(gpu_id)
         self.cfg = cfg
         self.in_shape = tuple((self.cfg.MODEL.PARAMS.INPUT_H, self.cfg.MODEL.PARAMS.INPUT_W))
@@ -61,6 +64,8 @@ class Trainer():
         # for name, param in self.backbone.state_dict().items():
         #     print(name)
         self.backbone.eval()
+        resnet = resnet50(pretrained=True)
+        self.feat_encoder = nn.ModuleList([resnet.conv1, resnet.bn1, resnet.relu, resnet.maxpool, resnet.layer1])
         # ROIAlign takes images and ROIs as input and outputs a tensor of size [K, in_chans, (OUT_SIZE)] where K = #bboxes
         # self.roi_align = RoIAlign(output_size=(self.cfg.MODEL.PARAMS.ROI_OUT_SIZE, self.cfg.MODEL.PARAMS.ROI_OUT_SIZE), spatial_scale=3, sampling_ratio=2,aligned=True)
         
@@ -276,6 +281,7 @@ class Trainer():
             for j in range(num_gt):
                 # if gt_masks[j, 1, 0, 0] == bbs[i, 0]: # check if gt mask is in same image as prediction
                 gt_mask_roi = self.crop_and_resize_mask(gt_masks[j,0], bbs[i])
+                save_image(gt_mask_roi, "test_gt.png")
                 # save_image(pred_masks[i], "test_pred.png")
                 iou_matrix[i, j] = self.calculate_IOU(pred_masks[i], gt_mask_roi)
                 # test =  self.calculate_IOU(gt_mask_roi, torch.ones_like(gt_mask_roi))
@@ -320,8 +326,8 @@ class Trainer():
                 loss += self.compute_loss(pred_masks[i], zero_mask)
             else:
                 gt_mask = self.crop_and_resize_mask(gt_masks[j,0], bbs[i])
-                # compare = torch.cat((pred_masks[i], gt_mask), dim=0).unsqueeze(0)
-                # save_image(compare, "test_compare.png")
+                compare = torch.cat((pred_masks[i], gt_mask), dim=0).unsqueeze(0)
+                save_image(compare, "test_compare.png")
                 loss += self.compute_loss(pred_masks[i], gt_mask)
         return loss
     
@@ -465,27 +471,17 @@ class Trainer():
                 else:
                     continue
                 
-                # draw bounding box on image
-                # img = img_batch[0].permute(1,2,0).cpu().numpy()
-                # img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-                # for roi in rois:
-                #     x1, y1, x2, y2 = roi[1].item(), roi[2].item(), roi[3].item(), roi[4].item()
-                #     start_point = (int(x1), int(y1))
-                #     end_point = (int(x2), int(y2))
-                #     color = (255, 0, 0)
-                #     thickness = 1
-                #     img = cv2.rectangle(img, start_point, end_point, color, thickness)
-                # img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                # img = transforms.ToTensor()(img)
-                # save_image(img, "img_2.png")
+                feats = img_batch
+                for l in self.feat_encoder:
+                    feats = l(feats)
 
-                f_roi = roi_align(img_batch, rois, output_size=(self.cfg.MODEL.PARAMS.ROI_OUT_SIZE, self.cfg.MODEL.PARAMS.ROI_OUT_SIZE), spatial_scale=1, sampling_ratio=-1,aligned=True) # [K, C, H_r, W_r]
+                f_roi = roi_align(feats, rois, output_size=(self.cfg.MODEL.PARAMS.ROI_OUT_SIZE, self.cfg.MODEL.PARAMS.ROI_OUT_SIZE), spatial_scale=0.25, sampling_ratio=-1,aligned=True) # [K, C, H_r, W_r]
                 # normalize
                 # mean = [0.485, 0.456, 0.406]
                 # std = [0.229, 0.224, 0.225]
                 # f_roi = transforms.Normalize(mean, std)(f_roi)
-                save_image(f_roi[0], "img_1.png")
-                masks = self.model(f_roi) # [K, 4, 64, 64], [K, 5]
+                # save_image(f_roi[0], "img_1.png")
+                masks = self.model(f_roi) # [K, 4, 56, 56], [K, 5]
                 if masks is None:
                     print("No masks")
                     continue

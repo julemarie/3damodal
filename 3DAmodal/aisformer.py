@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torchvision.ops import RoIAlign
+from torchvision.ops import roi_align
 from torchvision.models import resnet50
 from torchvision.models.detection import fasterrcnn_resnet50_fpn
 from torchvision import transforms
@@ -47,8 +47,8 @@ class AISFormer(nn.Module):
         # # ROIAlign takes images and ROIs as input and outputs a tensor of size [K, in_chans, (OUT_SIZE)] where K = #bboxes
         # self.roi_align = RoIAlign(output_size=(self.roi_out_size, self.roi_out_size), spatial_scale=3, sampling_ratio=2,aligned=True)
         # deconvolution 
-        self.deconv = nn.ConvTranspose2d(in_channels=self.in_chans, out_channels=self.in_chans, kernel_size=(2,2), stride=2)
-        self.conv = nn.Conv2d(in_channels=self.in_chans, out_channels=self.in_chans, kernel_size=(1,1), stride=1)
+        self.deconv = nn.ConvTranspose2d(in_channels=self.embed_dim, out_channels=self.embed_dim, kernel_size=(2,2), stride=2)
+        self.conv = nn.Conv2d(in_channels=self.embed_dim, out_channels=self.embed_dim, kernel_size=(1,1), stride=1)
         self.encoder = Encoder(self.embed_dim, (self.roi_out_size*2)**2, num_heads=self.encoder_num_heads)
         self.decoder = Decoder(self.embed_dim, Q_dim=self.Q_dim, num_heads=self.decoder_num_heads)
         self.mlp = nn.ModuleList([
@@ -61,6 +61,10 @@ class AISFormer(nn.Module):
 
     def init_weights(self):
         nn.init.kaiming_normal_(self.deconv.weight, mode='fan_out', nonlinearity='relu')
+        nn.init.constant_(self.deconv.bias, 0)
+        nn.init.kaiming_normal_(self.conv.weight, mode='fan_out', nonlinearity='relu')
+        nn.init.constant_(self.conv.bias, 0)
+
 
     def patchify(self, x):
         """
@@ -88,37 +92,43 @@ class AISFormer(nn.Module):
         x = torch.einsum('nhwpqc->nchpwq', x)
         imgs = x.reshape(shape=(x.shape[0], c, h * p, h * p))
         return imgs
+    
+    def min_max_normalize(self, vector, dim=1):
+        min_vals, _ = torch.min(vector, dim=dim, keepdim=True)
+        max_vals, _ = torch.max(vector, dim=dim, keepdim=True)
+
+        # Check if the range is zero
+        range_nonzero = (max_vals - min_vals) != 0
+
+        # Apply normalization only when the range is nonzero
+        normalized_vector = torch.where(range_nonzero, (vector - min_vals) / (max_vals - min_vals), vector)
+
+        # If the range is zero, set the normalized vector to one
+        normalized_vector = torch.where(~range_nonzero, torch.ones_like(vector), normalized_vector)
+
+        return normalized_vector
         
     def forward(self, x):
         B, C, H, W = x.shape
-        # thresh = 0.9
-        # x = self.backbone(imgs)
-        # roi_list = []
-        # for i, ann in enumerate(x):
-        #     boxes = ann["boxes"][torch.where(ann["scores"] > thresh)]
-        #     id = i*torch.ones((boxes.shape[0]), dtype=torch.int, device=self.device).unsqueeze(-1)
-        #     roi_list.append(torch.cat((id, boxes), dim=1))
 
-        # if roi_list:
-        #     rois = torch.cat(roi_list, dim=0) # [K, 5] K: #bboxes, 5: first for id and last four for corners
-        # else:
-        #     return None, roi_list
-
-        # f_roi2 = self.roi_align(imgs, rois) # [K, C, H_r, W_r]
-        f_roi1 = self.conv(self.deconv(x)) # [K, C, H_r', W_r']
+        f_roi1 = self.conv(self.deconv(x)) # [K, C, H_m, W_m]
+        f_roi1 = f_roi1.flatten(2).permute(0,2,1) # [K, H_m*W_m, C]
         f_e = self.encoder(f_roi1) # [K, H_m*W_m, C]
-        Q = self.decoder(f_e) # [C, 3]
+        Q = self.decoder(f_e) # [3, C]
+        Q = Q.moveaxis(0,1) # [C, 3]
         Q_vis_am = torch.cat((Q[:,1], Q[:,2]), dim=0)
         I_i = Q_vis_am
         for i, layer in enumerate(self.mlp):
             I_i = F.gelu(layer(I_i)) if i < len(self.mlp)-1 else layer(I_i)  # [C]
         I_i = I_i.unsqueeze(-1)
-        roi_embed = self.unflatten(f_roi1.flatten(2) + f_e.permute(0,2,1)) # [K, C, H_m, W_m]
+        roi_embed = f_roi1 + f_e # [K, H_m*W_m, C]
+        roi_embed = self.unflatten(roi_embed.permute(0,2,1)) # [K, C, H_m, W_m]
         masks = torch.tensordot(roi_embed, torch.cat((Q, I_i), dim=1), dims=([1], [0])).permute(0,3,1,2)
+        # min-max normalization between 0 and 1
         masks = masks.reshape(masks.shape[0]*masks.shape[1], -1)
-        masks = masks - masks.min(1, keepdim=True)[0]
-        masks = masks/masks.max(1, keepdim=True)[0]
+        masks = self.min_max_normalize(masks, dim=1)
         masks = masks.reshape(x.shape[0], 4, self.roi_out_size*2, self.roi_out_size*2)
+        # binary thresholding
         masks[masks < 0.5] = 0
         masks[masks >= 0.5] = 1
         return masks # [K, 4, H_m, W_m]
@@ -131,15 +141,19 @@ class Encoder(nn.Module):
     def __init__(self, embed_dim, seq_len, num_heads):
         super().__init__()
 
-        self.embed_dim = embed_dim
-        self.pos_encod = nn.Parameter(torch.zeros(1, seq_len, self.embed_dim))
+        self.pos_encod = nn.Parameter(torch.zeros(1, seq_len, embed_dim))
         self.attention = MultiHeadAttention(embed_dim, embed_dim, num_heads)
-        self.norm = nn.LayerNorm(self.embed_dim)
-        self.ffn = nn.Linear(self.embed_dim, self.embed_dim)
+        self.norm1 = nn.LayerNorm(embed_dim)
+        self.norm2 = nn.LayerNorm(embed_dim)
+        self.ffn = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(embed_dim, embed_dim)
+        )
 
     def forward(self, x):
         # flatten feature vectors
-        x = x.flatten(2).permute(0,2,1) # [K, H_m*W_m, C]
+        # x = x.flatten(2).permute(0,2,1) # [K, H_m*W_m, C]
         
         # x shape: [K, N, embed_dim], N: num_patches
 
@@ -148,7 +162,9 @@ class Encoder(nn.Module):
         # self attention layer and add x
         x = x + self.attention(input_q=x, input_kv=x)
         # apply layer norm and linear layer
-        x = self.ffn(self.norm(x))
+        x = self.ffn(self.norm1(x))
+        # apply layer norm
+        x = self.norm2(x)
         
         return x
     
@@ -159,43 +175,60 @@ class Decoder(nn.Module):
     def __init__(self, embed_dim, Q_dim, num_heads):
         super().__init__()
 
-        self.Q = nn.Parameter(torch.ones((embed_dim, Q_dim)).unsqueeze(0))
+        self.Q = nn.Parameter(torch.ones((Q_dim, embed_dim)).unsqueeze(0))
 
-        self.attention = MultiHeadAttention(Q_dim, Q_dim, num_heads)
-        self.norm_self = nn.LayerNorm(Q_dim)
-        self.ffn_self = nn.Linear(Q_dim, Q_dim)
-        self.cross_attention = MultiHeadAttention(Q_dim,embed_dim, num_heads)
-        self.norm_cross1 = nn.LayerNorm(Q_dim)
-        self.ffn_cross1 = nn.Linear(Q_dim, Q_dim)
-        self.norm_cross2 = nn.LayerNorm(Q_dim)
-        self.ffn_cross2 = nn.Linear(Q_dim, Q_dim)
+        self.attention = MultiHeadAttention(embed_dim, embed_dim, num_heads)
+        self.norm_self = nn.LayerNorm(embed_dim)
+        
+        self.cross_attention = MultiHeadAttention(embed_dim,embed_dim, num_heads)
+        self.norm_cross1 = nn.LayerNorm(embed_dim)
+        self.ffn_cross1 = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(embed_dim, embed_dim)
+        )
+        self.norm_cross2 = nn.LayerNorm(embed_dim)
+        self.ffn_cross2 = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(embed_dim, embed_dim)
+        )
 
     def forward(self, x):
         K, N, D = x.shape
         Q = self.Q.repeat(K, 1, 1)
-        attn_Q = Q + self.attention(input_q=Q, input_kv=Q)
-        attn_Q = self.ffn_self(self.norm_self(attn_Q))
-
-        Q = Q + attn_Q
+        Q = Q + self.attention(input_q=Q, input_kv=Q)
+        Q = self.norm_self(Q)
 
         Q = Q + self.cross_attention(input_q=Q, input_kv=x)
-        Q = self.ffn_cross1(self.norm_cross1(Q))
-        Q = Q + self.ffn_cross2(self.norm_cross2(Q))
+        Q = self.norm_cross1(Q)
+        Q = Q + self.ffn_cross1(Q)
+        Q = self.ffn_cross2(self.norm_cross2(Q))
 
         Q = Q[0, :, :].squeeze(0)
 
         return Q
 
-            
+
+
+def test():
+    encoder = Encoder(256, 28*28, 8)
+    decoder = Decoder(256, 3, 8)
+    x = torch.randn((1, 28*28, 256))
+    x = encoder(x)
+    Q = decoder(x)
+
 
 if __name__ == "__main__":
+    test()
+    exit()
     # load config
     cfg = OmegaConf.load("configs/config.yaml")
 
     in_shape = tuple((cfg.MODEL.PARAMS.INPUT_H, cfg.MODEL.PARAMS.INPUT_W))
 
-    img = cv2.imread("3DAmodal/front_full_0000_rgb.jpg")
-    img2 = cv2.imread("3DAmodal/front_full_0063_rgb.jpg")
+    img = cv2.imread("front_full_0000_rgb.jpg")
+    img2 = cv2.imread("front_full_0063_rgb.jpg")
     H, W, C = img.shape # for ASD: [1080, 1920, 3]
     transform = transforms.Compose([
         transforms.ToTensor(),
@@ -209,6 +242,47 @@ if __name__ == "__main__":
     imgs = torch.cat((img, img2), dim=0)
 
     print(imgs.shape)
+    backbone = fasterrcnn_resnet50_fpn(pretrained=True)
+    backbone.eval()
+
+    # img = img.unsqueeze(0)
+    thresh = 0.9
+    x = backbone(img)
+    roi_list = []
+    for i, ann in enumerate(x):
+        boxes = ann["boxes"][torch.where(ann["scores"] > thresh)]
+        id = i*torch.ones((boxes.shape[0]), dtype=torch.int).unsqueeze(-1)
+        roi_list.append(torch.cat((id, boxes), dim=1))
+
+    if roi_list:
+        rois = torch.cat(roi_list, dim=0) # [K, 5] K: #bboxes, 5: first for id and last four for corners
+    else:
+        pass
+
+
+
+    resnet = resnet50(pretrained=True)
+    resnet.eval()
+    
+    out = resnet.conv1(img)
+    out = resnet.bn1(out)
+    out = resnet.relu(out)
+    out = resnet.maxpool(out)
+    out = resnet.layer1(out)
+
+    out = roi_align(out, rois, output_size=(cfg.MODEL.PARAMS.ROI_OUT_SIZE, cfg.MODEL.PARAMS.ROI_OUT_SIZE), spatial_scale=0.25, aligned=True)
+
+
+
+    out = resnet.layer2(out)
+    out = resnet.layer3(out)
+    out = resnet.layer4(out)
+    out = resnet.avgpool(out)
+    out = torch.flatten(out, 1)
+    out = resnet.fc(out)
+    print(out.shape)
+
+
 
 
     aisformer = AISFormer(in_shape=in_shape, cfg=cfg)

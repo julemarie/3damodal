@@ -3,6 +3,9 @@ mmdetection3d/
 cocoapi/
 *.JPEG
 *.png
+runs/
+checkpoints/
+testing.py
 
 .vscode/
 

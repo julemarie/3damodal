@@ -21,7 +21,7 @@ import torch
 import torch.nn as nn
 from torchvision import transforms
 from torch.utils.data import DataLoader
-from torchvision.utils import save_image
+from torchvision.utils import save_image, make_grid
 from scipy.optimize import linear_sum_assignment
 
 # distributed training
@@ -29,6 +29,19 @@ import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 import os
+
+# logging
+from torch.utils.tensorboard import SummaryWriter
+import datetime
+
+RUNS_FOLDER = "runs"
+CKP_FOLDER = "checkpoints"
+if not os.path.exists(RUNS_FOLDER):
+    os.mkdir(RUNS_FOLDER)
+if not os.path.exists(CKP_FOLDER):
+    os.mkdir(CKP_FOLDER)
+
+writer = SummaryWriter("{}/{}".format(RUNS_FOLDER, datetime.datetime.now().strftime("%Y%m%d-%H%M%S")))
 
 
 def ddp_setup(rank, world_size):
@@ -93,7 +106,7 @@ class Trainer():
 
         self.optimizer = torch.optim.SGD(self.model.parameters(), lr=self.cfg.LEARNING_RATE)
 
-        self.scheduler = torch.optim.lr_scheduler.ExponentialLR(self.optimizer, gamma=0.75)
+        self.scheduler = torch.optim.lr_scheduler.ExponentialLR(self.optimizer, gamma=1)
 
         self.epochs = self.cfg.EPOCHS
 
@@ -136,6 +149,8 @@ class Trainer():
     def compute_loss(self, pred_mask, gt_mask):
         # compute binnary cross entropy loss
         loss = torch.nn.functional.binary_cross_entropy(pred_mask, gt_mask)
+        # compute cross entropy loss
+        # loss = torch.nn.functional.cross_entropy(pred_mask, gt_mask)
         # compute dice loss
         # intersection = (pred_mask.int() & gt_mask.int()).float().sum((0,1))
         # union = (pred_mask.int() | gt_mask.int()).float().sum((0,1))
@@ -295,7 +310,7 @@ class Trainer():
 
         return iou_matrix
     
-    def assign_iou(self, pred_masks, gt_masks,  bbs, iou_threshold=0.5):
+    def assign_iou(self, pred_masks, gt_masks,  bbs, iou_threshold=0.0):
         """
             Assign pred masks to GT masks for loss calculation using IOU matrix and the Hungarian algorithm for optimal assignment.
         """
@@ -447,7 +462,8 @@ class Trainer():
         # torch.cuda.empty_cache()
         for epoch_idx in tqdm(range(self.epochs)):
             # for data, anns in self.dataloader:
-            for img_batch, anns in tqdm(self.dataloader):
+            running_loss = 0.0
+            for i, (img_batch, anns) in enumerate(tqdm(self.dataloader)):
                 # 1) Extract masks from annotations
                 """
                 anns: list[dict]
@@ -558,19 +574,38 @@ class Trainer():
                 #         print("None gradient for {}".format(name))
                 self.optimizer.step()
 
-            save_image(m_v[0], "test_v_{}.png".format(epoch_idx))
-            save_image(m_a[0], "test_a_{}.png".format(epoch_idx))
-            save_image(m_i[0], "test_i_{}.png".format(epoch_idx))
-            save_image(m_o[0], "test_o_{}.png".format(epoch_idx))
-            
+                running_loss += total_loss.item()
+
+                writer.add_scalar("Training loss [batch]", total_loss, epoch_idx*len(self.dataloader)+i)
+                loss_dict = {"Loss amodal [batch]": loss_a,
+                             "Loss visible [batch]": loss_v,
+                             "Loss invisible [batch]": loss_i}
+                writer.add_scalars("Individual losses [batch]", loss_dict, epoch_idx*len(self.dataloader)+i)
+
+
+            # save_image(m_v[0], "test_v_{}.png".format(epoch_idx))
+            # save_image(m_a[0], "test_a_{}.png".format(epoch_idx))
+            # save_image(m_i[0], "test_i_{}.png".format(epoch_idx))
+            # save_image(m_o[0], "test_o_{}.png".format(epoch_idx))
+            # print(gt_invis_masks[0][assigned_masks_i[0]][None,None].shape)
+            # gt_masks = torch.cat((gt_inmodal_masks[0][assigned_masks_v[0]][None,None], gt_amodal_masks[0][assigned_masks_a[0]][None,None], gt_invis_masks[0][assigned_masks_i[0]][None,None], torch.zeros_like(gt_invis_masks[0][assigned_masks_i[0]][None,None])), dim=0)
+            # print(gt_masks.shape)
+            masks = torch.cat((m_v[0][None,None], m_a[0][None,None], m_i[0][None,None], m_o[0][None,None]), dim=0)
+            writer.add_images("masks", masks, epoch_idx*len(self.dataloader), dataformats="NCHW")
+
+            writer.add_scalar("Training loss [epoch]", running_loss/len(self.dataloader), epoch_idx*len(self.dataloader))
+            loss_dict = {"Loss amodal [epoch]": loss_a,
+                            "Loss visible [epoch]": loss_v,
+                            "Loss invisible [epoch]": loss_i}
+            writer.add_scalars("Individual losses [epoch]", loss_dict, epoch_idx*len(self.dataloader))
 
             self.scheduler.step()
 
-                # torch.cuda.empty_cache()
+            print("\nLoss after epoch {}: {}\n".format(epoch_idx, running_loss/len(self.dataloader)))
 
-                # 5) start training and save masks, feature tensors, and attention maps for visualisation (check paper what they used)
+            if epoch_idx % self.save_interval == 0:
+                torch.save(self.model.state_dict(), "{}/aisformer_{}.pth".format(CKP_FOLDER, epoch_idx))
 
-            print("Loss after epoch {}: {}".format(epoch_idx, total_loss))
 
 def main(rank: int, world_size: int, cfg: OmegaConf):
     if world_size > 1:
@@ -599,3 +634,5 @@ if __name__ == "__main__":
     else:
         world_size = world_size//2
         mp.spawn(main, args=(world_size, cfg), nprocs=world_size)
+
+    writer.close()

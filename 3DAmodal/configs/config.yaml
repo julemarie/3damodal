@@ -41,7 +41,7 @@ OUTPUT_DIR:
     TRAINING: "./outputs/training/"
     TESTING: "./outputs/testing/"
 DEVICE: 'cuda'
-DISTRIBUTED: False
+DISTRIBUTED: True
     # ENABLE: True
     # NUM_DEVICES: 4
 SAVE_INTERVAL: 5

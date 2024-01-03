@@ -30,76 +30,89 @@ import matplotlib.pyplot as plt
 
 
 class AISFormer(nn.Module):
-    def __init__(self,cfg,input_shape: ShapeSpec):
+    def __init__(self, devices):
         super(AISFormer, self).__init__()
         # fmt: off
-        num_classes       = cfg.MODEL.ROI_HEADS.NUM_CLASSES
-        conv_dims         = cfg.MODEL.ROI_MASK_HEAD.CONV_DIM
-        self.norm         = cfg.MODEL.ROI_MASK_HEAD.NORM
-        num_conv          = cfg.MODEL.ROI_MASK_HEAD.NUM_CONV
-        input_channels    = input_shape.channels
-        cls_agnostic_mask = cfg.MODEL.ROI_MASK_HEAD.CLS_AGNOSTIC_MASK
-        num_mask_classes = 1 if cls_agnostic_mask else num_classes
-        self.num_mask_classes = num_mask_classes
-        self.aisformer = cfg.MODEL.AISFormer
+        # num_classes       = cfg.MODEL.ROI_HEADS.NUM_CLASSES
+        # conv_dims         = cfg.MODEL.ROI_MASK_HEAD.CONV_DIM
+        # self.norm         = cfg.MODEL.ROI_MASK_HEAD.NORM
+        # num_conv          = cfg.MODEL.ROI_MASK_HEAD.NUM_CONV
+        # input_channels    = input_shape.channels
+        # cls_agnostic_mask = cfg.MODEL.ROI_MASK_HEAD.CLS_AGNOSTIC_MASK
+        # num_mask_classes = 1 if cls_agnostic_mask else num_classes
+        # self.num_mask_classes = num_mask_classes
+        # self.aisformer = cfg.MODEL.AISFormer
         # fmt: on
+
+        self.devs = devices
+        self.num_dev = len(devices)
+        self.num_ops = 8
+
+        conv_dims = 256
+        num_mask_classes = 1
+        num_heads = 8
+        num_layers = 1
+        
 
         # deconv
         self.deconv_for_TR = nn.Sequential(
                 nn.ConvTranspose2d(conv_dims, conv_dims, kernel_size=(2, 2), stride=(2, 2)),
                 nn.ReLU()
-            )
+            ).to(device=self.devs[0])
         weight_init.c2_msra_fill(self.deconv_for_TR[0])
 
         # feature map fcn
-        self.mask_feat_learner_TR = Conv2d(256, 256, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), activation=nn.ReLU())
+        self.mask_feat_learner_TR = Conv2d(256, 256, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), activation=nn.ReLU()).to(device=self.devs[0])
         weight_init.c2_msra_fill(self.mask_feat_learner_TR)
 
         # mask predictor
-        self.predictor_TR = Conv2d(1, num_mask_classes, kernel_size=1, stride=1, padding=0)
-        nn.init.normal_(self.predictor_TR.weight, std=0.001)
-        if self.predictor_TR.bias is not None:
-            nn.init.constant_(self.predictor_TR.bias, 0)
+        # self.predictor_TR = Conv2d(1, num_mask_classes, kernel_size=1, stride=1, padding=0)
+        # nn.init.normal_(self.predictor_TR.weight, std=0.001)
+        # if self.predictor_TR.bias is not None:
+        #     nn.init.constant_(self.predictor_TR.bias, 0)
 
         # pixel embedding
-        self.pixel_embed = nn.Conv2d(256, 256, kernel_size=(1, 1), stride=(1, 1))
+        self.pixel_embed = nn.Conv2d(256, 256, kernel_size=(1, 1), stride=(1, 1)).to(device=self.devs[1])
         nn.init.normal_(self.pixel_embed.weight, std=0.001)
         if self.pixel_embed.bias is not None:
             nn.init.constant_(self.pixel_embed.bias, 0)
 
         # mask embedding
-        self.mask_embed = MLP(256,256,256,3)
+        self.mask_embed = MLP(256,256,256,3).to(device=self.devs[1])
         for layer in self.mask_embed.layers:
             torch.nn.init.xavier_uniform_(layer.weight)
 
         # subtract modeling
-        self.subtract_model = MLP(512, 256, 256, 2)
+        self.subtract_model = MLP(512, 256, 256, 2).to(device=self.devs[1])
         for layer in self.subtract_model.layers:
             torch.nn.init.xavier_uniform_(layer.weight)
 
         # norm rois
-        self.norm_rois = nn.LayerNorm(256)
+        self.norm_rois = nn.LayerNorm(256).to(device=self.devs[1])
 
 
         # transformer layers
         emb_dim = conv_dims
-        self.positional_encoding = PositionEmbeddingLearned(emb_dim//2)
+        self.positional_encoding = PositionEmbeddingLearned(emb_dim//2).to(device=self.devs[0])
 
-        encoder_layer = TransformerEncoderLayer(d_model=emb_dim, nhead=self.aisformer.N_HEADS, normalize_before=False)
-        self.transformer_encoder = TransformerEncoder(encoder_layer, num_layers=self.aisformer.N_LAYERS)
+        encoder_layer = TransformerEncoderLayer(d_model=emb_dim, nhead=num_heads, normalize_before=False)
+        self.transformer_encoder = TransformerEncoder(encoder_layer, num_layers=num_layers).to(device=self.devs[0]) # 6 is the default of detr
 
-        decoder_layer = TransformerDecoderLayer(d_model=emb_dim, nhead=self.aisformer.N_HEADS, normalize_before=False)
-        self.transformer_decoder = TransformerDecoder(decoder_layer, num_layers=self.aisformer.N_LAYERS) # 6 is the default of detr
+        decoder_layer = TransformerDecoderLayer(d_model=emb_dim, nhead=num_heads, normalize_before=False)
+        self.transformer_decoder = TransformerDecoder(decoder_layer, num_layers=num_layers).to(device=self.devs[1]) # 6 is the default of detr
 
         n_output_masks = 4 # 4 embeddings, vi_mask, occluder, a_mask, invisible_mask
-        self.query_embed = nn.Embedding(num_embeddings=n_output_masks, embedding_dim=emb_dim)
+        self.query_embed = nn.Embedding(num_embeddings=n_output_masks, embedding_dim=emb_dim).to(device=self.devs[1])
 
 
     def forward(self, x):
-        x_ori = x.clone()
-        bs = x_ori.shape[0]
-        emb_dim = x_ori.shape[1]
-        spat_size = x_ori.shape[-1]
+        bs, emb_dim, spat_size, spat_size = x.shape
+        # x_ori = x.clone()
+        # bs = x_ori.shape[0]
+        # emb_dim = x_ori.shape[1]
+        # spat_size = x_ori.shape[-1]
+
+        x = x.to(device=self.devs[0])
 
         # short range learning
         x = self.mask_feat_learner_TR(x)
@@ -114,28 +127,31 @@ class AISFormer(nn.Module):
         encoded_feat_embs = self.transformer_encoder(feat_embs, 
                                                     pos=pos_embed)
 
+        encoded_feat_embs = encoded_feat_embs.to(device=self.devs[1])
+        pos_embed = pos_embed.to(device=self.devs[1])
         # decode
-        query_embed = self.query_embed.weight.unsqueeze(1).repeat(1, bs, 1)
-        tgt = torch.zeros_like(query_embed) 
+        query_embed = self.query_embed.weight.unsqueeze(1).repeat(1, bs, 1).to(device=self.devs[1])
+        tgt = torch.zeros_like(query_embed, device=self.devs[1])
         decoder_output = self.transformer_decoder(tgt, encoded_feat_embs, 
                                         pos=pos_embed, 
                                         query_pos=query_embed) # (1, n_masks, bs, dim)
 
         decoder_output = decoder_output.squeeze(0).moveaxis(1,0)
 
+        x = x.to(device=self.devs[1])
         # predict mask
-        roi_embeding =  encoded_feat_embs.permute(1,2,0).unflatten(-1, (28,28))
+        roi_embeding =  encoded_feat_embs.permute(1,2,0).unflatten(-1, (28*2,28*2))
         roi_embeding = roi_embeding + x # long range + short range
         roi_embeding = self.norm_rois(roi_embeding.permute(0,2,3,1)).permute(0,3,1,2)
         roi_embeding = self.pixel_embed(roi_embeding)
 
         mask_embs = self.mask_embed(decoder_output)
-        if self.aisformer.JUSTIFY_LOSS:
-            assert self.aisformer.USE == True
-            combined_feat = torch.cat([mask_embs[:,2,:],mask_embs[:,0,:]], axis=1)
-            invisible_embs = self.subtract_model(combined_feat)
-            invisible_embs = invisible_embs.unsqueeze(1)
-            mask_embs = torch.concat([mask_embs, invisible_embs], axis=1)
+        # if self.aisformer.JUSTIFY_LOSS:
+        #     assert self.aisformer.USE == True
+        #     combined_feat = torch.cat([mask_embs[:,2,:],mask_embs[:,0,:]], axis=1)
+        #     invisible_embs = self.subtract_model(combined_feat)
+        #     invisible_embs = invisible_embs.unsqueeze(1)
+        #     mask_embs = torch.concat([mask_embs, invisible_embs], axis=1)
 
         outputs_mask = torch.einsum("bqc,bchw->bqhw", mask_embs, roi_embeding)
 
@@ -143,27 +159,22 @@ class AISFormer(nn.Module):
         bo_masks        = outputs_mask[:,1,:,:].unsqueeze(1) #occluder mask
         a_masks         = outputs_mask[:,2,:,:].unsqueeze(1) #amodal mask
         invisible_masks = outputs_mask[:,-1,:,:].unsqueeze(1) #invisible mask
-        dump_tensor = torch.zeros_like(vi_masks).to(device='cuda')
+        # dump_tensor = torch.zeros_like(vi_masks).to(device='cuda')
 
         return vi_masks, bo_masks, a_masks, invisible_masks
     
 
 
-if __name__ == "__main__":
-    test_conv = Conv2d(256, 256, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), activation=nn.ReLU())
-    deconv_for_TR = nn.Sequential(
-                nn.ConvTranspose2d(256, 256, kernel_size=(2, 2), stride=(2, 2)),
-                nn.ReLU()
-            )
-    
-    conv_up = nn.Conv2d(3, 256, kernel_size=(1, 1), stride=(1, 1))
-
-    example_input = torch.randn(1, 3, 28, 28)
-    out = conv_up(example_input)
-
-
-    test_out = test_conv(out)
-    test_out = deconv_for_TR(test_out)
-    print(test_out.shape)
-
+def test():
+    x = torch.randn(2, 256, 28, 28)
     model = AISFormer()
+    # model.to(device='cuda')
+    print("inference")
+    vi_masks, bo_masks, a_masks, invisible_masks = model(x)
+    print(vi_masks.shape)
+    print(bo_masks.shape)
+    print(a_masks.shape)
+    print(invisible_masks.shape)
+
+if __name__ == "__main__":
+    test()

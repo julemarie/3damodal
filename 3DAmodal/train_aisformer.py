@@ -1,4 +1,5 @@
 from aisformer import AISFormer
+from aisformer_orig import AISFormer as AISFormer_orig
 # from datasets.asd_dataset import AmodalSynthDriveDataset
 # from datasets.KINS_dataset import KINS
 import sys
@@ -28,7 +29,7 @@ import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 import os
- 
+
 
 def ddp_setup(rank, world_size):
     """
@@ -46,16 +47,12 @@ def ddp_setup(rank, world_size):
 
 
 class Trainer():
-    def __init__(self, gpu_id, cfg, train=True):
+    def __init__(self, cfg, device, multi_gpu=False, train=True):
         torch.autograd.set_detect_anomaly(True)
-        self.gpu_id = 'cpu' if gpu_id == -1 else 'cuda:{}'.format(gpu_id)
+        if device == -1:
+            device = torch.device("cpu")
         self.cfg = cfg
         self.in_shape = tuple((self.cfg.MODEL.PARAMS.INPUT_H, self.cfg.MODEL.PARAMS.INPUT_W))
-
-        # if self.cfg.DEVICE == 'cuda':
-        #     self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        # else:
-        #     self.device = 'cpu'
 
         self.save_interval = self.cfg.SAVE_INTERVAL
 
@@ -70,10 +67,16 @@ class Trainer():
         # self.roi_align = RoIAlign(output_size=(self.cfg.MODEL.PARAMS.ROI_OUT_SIZE, self.cfg.MODEL.PARAMS.ROI_OUT_SIZE), spatial_scale=3, sampling_ratio=2,aligned=True)
         
         # init model and move it to device
-        self.model = AISFormer(self.in_shape, self.cfg)
-        self.model.to(self.gpu_id)
-        if self.cfg.DISTRIBUTED:
-            self.model = DDP(self.model, device_ids=[self.gpu_id])
+        if multi_gpu:
+            self.devices = [device*2, device*2+1]
+        else:
+            self.devices = [device, device]
+        self.model = AISFormer_orig(self.devices)
+        # for name, param in self.model.named_parameters():
+        #     print(f"Name: {name}, device: {param.device}")
+        # self.model.to(self.gpu_id)
+        if multi_gpu:
+            self.model = DDP(self.model)
         
         # init dataloader
         if train:
@@ -89,6 +92,8 @@ class Trainer():
         self.roi_size = tuple((self.cfg.MODEL.PARAMS.ROI_OUT_SIZE*2, self.cfg.MODEL.PARAMS.ROI_OUT_SIZE*2))
 
         self.optimizer = torch.optim.SGD(self.model.parameters(), lr=self.cfg.LEARNING_RATE)
+
+        self.scheduler = torch.optim.lr_scheduler.ExponentialLR(self.optimizer, gamma=0.75)
 
         self.epochs = self.cfg.EPOCHS
 
@@ -322,7 +327,7 @@ class Trainer():
         loss = 0
         for i, j in assignment.items():
             if j == 'fp': # if false positive
-                zero_mask = torch.zeros((pred_masks[i].shape), device=self.gpu_id)
+                zero_mask = torch.zeros((pred_masks[i].shape), device=self.devices[1])
                 loss += self.compute_loss(pred_masks[i], zero_mask)
             else:
                 gt_mask = self.crop_and_resize_mask(gt_masks[j,0], bbs[i])
@@ -410,6 +415,22 @@ class Trainer():
 
             print("Loss after epoch {}: {}".format(epoch_idx, total_loss))
     
+    def normalize(self, x):
+        """
+            Normalize the input tensor between 0 and 1.
+
+            Inputs:
+                x: Tensor [K, H, W]
+        """
+        x = x.reshape(x.shape[0], -1)
+        x -= x.min(1, keepdim=True)[0]
+        x /= x.max(1, keepdim=True)[0]
+        # x[x >= 0.5] = 1
+        # x[x < 0.5] = 0
+        x = x.reshape(x.shape[0], self.cfg.MODEL.PARAMS.ROI_OUT_SIZE*2, self.cfg.MODEL.PARAMS.ROI_OUT_SIZE*2)
+
+        return x
+    
     def train_kins(self):
         self.model.train()
         # model_dict = self.model.state_dict()
@@ -420,7 +441,7 @@ class Trainer():
         # for param, name in zip(self.backbone.parameters(), self.backbone.state_dict().keys()):
         #     print("{}: {}".format(name, param.requires_grad))
         # model_dict = self.model.state_dict()
-        print("Starting training on GPU:{}...".format(self.gpu_id))
+        print("Starting training on GPU:{}...".format(self.devices))
         # print(torch.cuda.current_device())
         # clear gpu memory
         # torch.cuda.empty_cache()
@@ -443,16 +464,17 @@ class Trainer():
                         img_height,
                         img_width}
                 """
+                out_dev = self.devices[1]
                 gt_inmodal_masks, gt_amodal_masks = self.get_masks_kins2020(anns)
                 gt_invis_masks = [a-i for a, i in zip(gt_amodal_masks, gt_inmodal_masks)]
 
                 # move gt masks to gpu
-                gt_inmodal_masks = [m.to(self.gpu_id) for m in gt_inmodal_masks]
-                gt_amodal_masks = [m.to(self.gpu_id) for m in gt_amodal_masks]
-                gt_invis_masks = [m.to(self.gpu_id) for m in gt_invis_masks]
+                gt_inmodal_masks = [m.to(self.devices[1]) for m in gt_inmodal_masks]
+                gt_amodal_masks = [m.to(self.devices[1]) for m in gt_amodal_masks]
+                gt_invis_masks = [m.to(self.devices[1]) for m in gt_invis_masks]
 
                 # img_batch size: [B, 3, 540, 960] (ASD), [B, 3, 250, 828] (KINS)
-                img_batch = img_batch.to(self.gpu_id)
+                img_batch = img_batch
                 save_image(img_batch[0], "img_0.png")
 
                 # self.optimizer.zero_grad()
@@ -463,7 +485,7 @@ class Trainer():
                 roi_list = []
                 for i, ann in enumerate(x):
                     boxes = ann["boxes"][torch.where(ann["scores"] > thresh)]
-                    id = i*torch.ones((boxes.shape[0]), dtype=torch.int, device=self.gpu_id).unsqueeze(-1)
+                    id = i*torch.ones((boxes.shape[0]), dtype=torch.int, device='cpu').unsqueeze(-1)
                     roi_list.append(torch.cat((id, boxes), dim=1))
 
                 if roi_list:
@@ -481,21 +503,32 @@ class Trainer():
                 # std = [0.229, 0.224, 0.225]
                 # f_roi = transforms.Normalize(mean, std)(f_roi)
                 # save_image(f_roi[0], "img_1.png")
-                masks = self.model(f_roi) # [K, 4, 56, 56], [K, 5]
-                if masks is None:
-                    print("No masks")
-                    continue
+                # masks = self.model(f_roi) # [K, 4, 56, 56], [K, 5]
+                m_v, m_o, m_a, m_i = self.model(f_roi) # [K, 1, 56, 56], [K, 1, 56, 56], [K, 1, 56, 56], [K, 1, 56, 56]
+                m_v = m_v.squeeze(1)
+                m_o = m_o.squeeze(1)
+                m_a = m_a.squeeze(1)
+                m_i = m_i.squeeze(1)
+
+                # min max normalize between 0 and 1
+                m_v = self.normalize(m_v)
+                m_o = self.normalize(m_o)
+                m_a = self.normalize(m_a)
+                m_i = self.normalize(m_i)
+                # if masks is None:
+                #     print("No masks")
+                #     continue
                 
                 # torch.cuda.empty_cache()
-                rois = rois.to(torch.int).to('cpu')
-                K, num_masks, H_m, W_m = masks.shape
-                m_o = masks[:, 0] # occluder mask (no gt in KINS)
-                m_v = masks[:, 1] # visible mask (inmodal)
-                m_a = masks[:, 2] # amodal mask
-                m_i = masks[:, 3] # invisible mask (amodal - inmodal)
+                rois = rois.to(torch.int).to(self.devices[1])
+                # K, num_masks, H_m, W_m = masks.shape
+                # m_o = masks[:, 0] # occluder mask (no gt in KINS)
+                # m_v = masks[:, 1] # visible mask (inmodal)
+                # m_a = masks[:, 2] # amodal mask
+                # m_i = masks[:, 3] # invisible mask (amodal - inmodal)
 
-                save_image(m_v[0], "test_v.png")
-                save_image(m_v[1], "test_v1.png")
+                # save_image(m_v[0], "test_v.png")
+                # save_image(m_v[1], "test_v1.png")
                 
                 # 3) calculate the loss
                 # 3.1) assign predicted masks to gt masks using IOU matrix and Hungarian algorithm
@@ -518,9 +551,20 @@ class Trainer():
                 self.optimizer.zero_grad()
                 total_loss.backward()
                 # print gradients
-                for param in self.model.parameters():
-                    print(param.grad)
+                # for name, param in self.model.named_parameters():
+                #     if param.grad is not None:
+                #         print("Gradient {}: {}".format(name, param.grad.max()))
+                #     else:
+                #         print("None gradient for {}".format(name))
                 self.optimizer.step()
+
+            save_image(m_v[0], "test_v_{}.png".format(epoch_idx))
+            save_image(m_a[0], "test_a_{}.png".format(epoch_idx))
+            save_image(m_i[0], "test_i_{}.png".format(epoch_idx))
+            save_image(m_o[0], "test_o_{}.png".format(epoch_idx))
+            
+
+            self.scheduler.step()
 
                 # torch.cuda.empty_cache()
 
@@ -529,10 +573,18 @@ class Trainer():
             print("Loss after epoch {}: {}".format(epoch_idx, total_loss))
 
 def main(rank: int, world_size: int, cfg: OmegaConf):
-    # ddp_setup(rank, world_size)
-    trainer = Trainer(gpu_id=rank, cfg=cfg)
+    if world_size > 1:
+        ddp_setup(rank, world_size)
+        print("Init the Trainer...")
+        trainer = Trainer(cfg=cfg, device=rank, multi_gpu=True)
+    else:
+        print("Init the Trainer...")
+        trainer = Trainer(cfg=cfg, device=rank, multi_gpu=False)
+    print("Starting training...")
     trainer.train_kins()
-    # destroy_process_group()
+
+    if world_size > 1:
+        destroy_process_group()
 
 
 if __name__ == "__main__":
@@ -540,6 +592,10 @@ if __name__ == "__main__":
     cfg = OmegaConf.load(cfg_path)
     world_size = torch.cuda.device_count()
 
-    main(-1, world_size, cfg)
-
-    # mp.spawn(main, args=(world_size, cfg), nprocs=world_size)
+    if world_size == 0:
+        main(-1, world_size, cfg)
+    elif world_size == 1:
+        main(0, world_size, cfg)
+    else:
+        world_size = world_size//2
+        mp.spawn(main, args=(world_size, cfg), nprocs=world_size)

@@ -113,11 +113,12 @@ class AISFormer(nn.Module):
         # spat_size = x_ori.shape[-1]
 
         x = x.to(device=self.devs[0])
+        print("AFTER FEAT ",torch.cuda.memory_allocated(self.devs[0])/1.074e+9)
 
         # short range learning
         x = self.mask_feat_learner_TR(x)
         x = self.deconv_for_TR(x)
-
+        print("AFTER CONV ",torch.cuda.memory_allocated(self.devs[0])/1.074e+9)
         # position emb
         pos_embed = self.positional_encoding.forward_tensor(x)
         pos_embed = pos_embed.flatten(2).permute(2, 0, 1)
@@ -126,6 +127,9 @@ class AISFormer(nn.Module):
         feat_embs = x.flatten(2).permute(2, 0, 1)
         encoded_feat_embs = self.transformer_encoder(feat_embs, 
                                                     pos=pos_embed)
+        
+        print("AFTER ENC ",torch.cuda.memory_allocated(self.devs[0])/1.074e+9)
+        print("AFTER ENC MAX ",torch.cuda.max_memory_allocated(self.devs[0])/1.074e+9)
 
         encoded_feat_embs = encoded_feat_embs.to(device=self.devs[1])
         pos_embed = pos_embed.to(device=self.devs[1])
@@ -140,7 +144,7 @@ class AISFormer(nn.Module):
 
         x = x.to(device=self.devs[1])
         # predict mask
-        roi_embeding =  encoded_feat_embs.permute(1,2,0).unflatten(-1, (28*2,28*2))
+        roi_embeding =  encoded_feat_embs.permute(1,2,0).unflatten(-1, (16*2,16*2))
         roi_embeding = roi_embeding + x # long range + short range
         roi_embeding = self.norm_rois(roi_embeding.permute(0,2,3,1)).permute(0,3,1,2)
         roi_embeding = self.pixel_embed(roi_embeding)
@@ -148,10 +152,10 @@ class AISFormer(nn.Module):
         mask_embs = self.mask_embed(decoder_output)
         # if self.aisformer.JUSTIFY_LOSS:
         #     assert self.aisformer.USE == True
-        #     combined_feat = torch.cat([mask_embs[:,2,:],mask_embs[:,0,:]], axis=1)
-        #     invisible_embs = self.subtract_model(combined_feat)
-        #     invisible_embs = invisible_embs.unsqueeze(1)
-        #     mask_embs = torch.concat([mask_embs, invisible_embs], axis=1)
+        combined_feat = torch.cat([mask_embs[:,2,:],mask_embs[:,0,:]], axis=1)
+        invisible_embs = self.subtract_model(combined_feat)
+        invisible_embs = invisible_embs.unsqueeze(1)
+        mask_embs = torch.concat([mask_embs, invisible_embs], axis=1)
 
         outputs_mask = torch.einsum("bqc,bchw->bqhw", mask_embs, roi_embeding)
 
@@ -167,7 +171,8 @@ class AISFormer(nn.Module):
 
 def test():
     x = torch.randn(2, 256, 28, 28)
-    model = AISFormer()
+    devices = ['cpu', 'cpu']
+    model = AISFormer(devices)
     # model.to(device='cuda')
     print("inference")
     vi_masks, bo_masks, a_masks, invisible_masks = model(x)

@@ -34,6 +34,8 @@ import os
 from torch.utils.tensorboard import SummaryWriter
 import datetime
 
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "caching_allocator"
+
 RUNS_FOLDER = "runs"
 CKP_FOLDER = "checkpoints"
 if not os.path.exists(RUNS_FOLDER):
@@ -61,6 +63,7 @@ def ddp_setup(rank, world_size):
 
 class Trainer():
     def __init__(self, cfg, device, multi_gpu=False, train=True):
+        print(torch.cuda.memory_allocated(device))
         torch.autograd.set_detect_anomaly(True)
         if device == -1:
             device = torch.device("cpu")
@@ -80,6 +83,7 @@ class Trainer():
         # self.roi_align = RoIAlign(output_size=(self.cfg.MODEL.PARAMS.ROI_OUT_SIZE, self.cfg.MODEL.PARAMS.ROI_OUT_SIZE), spatial_scale=3, sampling_ratio=2,aligned=True)
         
         # init model and move it to device
+        print("BEFORE MODEL ",torch.cuda.memory_allocated(device)/1.074e+9)
         if multi_gpu:
             self.devices = [device*2, device*2+1]
         else:
@@ -90,6 +94,13 @@ class Trainer():
         # self.model.to(self.gpu_id)
         if multi_gpu:
             self.model = DDP(self.model)
+
+        print("AFTER MODEL ",torch.cuda.memory_allocated(device)/1.074e+9)
+
+        # load checkpoint if specified
+        if self.cfg.START_FROM_CKPT:
+            self.model.load_state_dict(torch.load(self.cfg.CKPT_PATH))
+            print("Loaded checkpoint from {}".format(self.cfg.CKPT_PATH))
         
         # init dataloader
         if train:
@@ -99,14 +110,15 @@ class Trainer():
         else:
             raise NotImplementedError
 
-        self.dataloader = get_dataloader(dataset, batch_size=1, num_workers=5, partition="image", distributed=self.cfg.DISTRIBUTED)
-
+        print("BEFORE DATLOADER ",torch.cuda.memory_allocated(device)/1.074e+9)
+        self.dataloader = get_dataloader(dataset, batch_size=1, num_workers=1, partition="image", distributed=self.cfg.DISTRIBUTED)
+        print("AFTER DATLOADER ",torch.cuda.memory_allocated(device)/1.074e+9)
         # self.resize = transforms.Resize((64, 64))
         self.roi_size = tuple((self.cfg.MODEL.PARAMS.ROI_OUT_SIZE*2, self.cfg.MODEL.PARAMS.ROI_OUT_SIZE*2))
 
         self.optimizer = torch.optim.SGD(self.model.parameters(), lr=self.cfg.LEARNING_RATE)
 
-        self.scheduler = torch.optim.lr_scheduler.ExponentialLR(self.optimizer, gamma=1)
+        self.scheduler = torch.optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda=lambda epoch: self.cosine_decay_lr(epoch, self.cfg.LEARNING_RATE, 0.0025, self.cfg.EPOCHS))
 
         self.epochs = self.cfg.EPOCHS
 
@@ -119,6 +131,23 @@ class Trainer():
         #                     "righ_full": 3,
         #                     "bev_full": 4}
 
+
+    def cosine_decay_lr(self, epoch, start_lr, end_lr, total_epochs):
+        """
+        Compute the learning rate using a cosine decay schedule.
+
+        Inputs:
+            epoch: Current epoch
+            start_lr: Starting learning rate
+            end_lr: Ending learning rate
+            total_epochs: Total number of epochs
+
+        Returns:
+            lr: Computed learning rate
+        """
+        cos_decay = 0.5 * (1 + np.cos(np.pi * epoch / total_epochs))
+        lr = end_lr + 0.5 * (start_lr - end_lr) * cos_decay
+        return lr
 
     def crop_and_resize_mask(self, mask, roi):
         """
@@ -147,8 +176,20 @@ class Trainer():
     
 
     def compute_loss(self, pred_mask, gt_mask):
+        """
+            Compute the loss between a prediction mask and a ground truth mask.
+
+            Inputs:
+                pred_mask: Tensor [H, W]
+                gt_mask: Tensor [H, W]
+        """
         # compute binnary cross entropy loss
-        loss = torch.nn.functional.binary_cross_entropy(pred_mask, gt_mask)
+        # loss = torch.nn.functional.binary_cross_entropy(pred_mask, gt_mask)
+        # define weight as avg number of black pixels / avg number of all pixels
+        all_pixels = gt_mask.shape[0]*gt_mask.shape[1]
+        black_pixels = all_pixels - gt_mask.sum()
+        weight = black_pixels / all_pixels
+        loss = torch.nn.functional.binary_cross_entropy_with_logits(pred_mask, gt_mask, weight=weight)
         # compute cross entropy loss
         # loss = torch.nn.functional.cross_entropy(pred_mask, gt_mask)
         # compute dice loss
@@ -225,6 +266,7 @@ class Trainer():
         h, w = ann['img_height'], ann['img_width']
         amodal_masks = []
         inmodal_masks = []
+        bbs = []
         all_amodal = torch.zeros((1, h, w))
         all_inmodal = torch.zeros((1, h, w))
         for key in ann.keys():
@@ -232,10 +274,18 @@ class Trainer():
                 continue
             amodal_mask = self.decode_mask_lst(ann[key]['a_segm'], h, w)
             inmodal_mask = self.decode_mask_lst(ann[key]['i_segm'], h, w)
-            inmodal_masks.append(inmodal_mask)
-            amodal_masks.append(amodal_mask)
-            all_amodal += amodal_mask
-            all_inmodal += inmodal_mask
+            bbs.append(ann[key]['i_bbox'])
+            if amodal_mask:
+                amodal_masks.append(amodal_mask)
+                all_amodal += amodal_mask
+            else:
+                amodal_masks.append(torch.zeros((1, h, w)))
+            if inmodal_mask:
+                inmodal_masks.append(inmodal_mask)
+                all_inmodal += inmodal_mask
+            else:
+                inmodal_masks.append(torch.zeros((1, h, w)))
+        
         amodal_masks = torch.stack(amodal_masks)
         inmodal_masks = torch.stack(inmodal_masks)
         amodal_masks = self.mask_tf(amodal_masks)
@@ -247,13 +297,16 @@ class Trainer():
         # combined_seg = torch.einsum('nchw->chw', seg_masks)
         # combined_inmodal = torch.einsum('nchw->chw', inmodal_masks)
 
-        return inmodal_masks, amodal_masks
+        return inmodal_masks, amodal_masks, bbs
     
     def get_masks_kins2020(self, anns):
         inmodal_masks_all = []
         amodal_masks_all = []
+        bbs_all = []
         for ann in anns:
-            inmodal_masks, amodal_masks = self.__get_mask_kins2020(ann)
+            inmodal_masks, amodal_masks, bbs = self.__get_mask_kins2020(ann)
+            bbs = torch.tensor(bbs)
+            bbs_all.append(bbs)
             # min max normalize between 0 and 1
             inmodal_masks = inmodal_masks.view(inmodal_masks.shape[0]*inmodal_masks.shape[1], -1)
             inmodal_masks -= inmodal_masks.min(1, keepdim=True)[0]
@@ -267,7 +320,7 @@ class Trainer():
             inmodal_masks_all.append(inmodal_masks)
             amodal_masks_all.append(amodal_masks)
 
-        return inmodal_masks_all, amodal_masks_all
+        return inmodal_masks_all, amodal_masks_all, bbs_all
     
     def calculate_IOU(self, mask1, mask2):
         """
@@ -282,15 +335,42 @@ class Trainer():
         union = (mask1.int() | mask2.int()).float().sum((0,1))
         iou = (intersection + 1e-6) / (union + 1e-6)
         return iou
+    
+    def calculate_IOU_bbs(self, bb1, bb2):
+        """
+            Calculate IOU between two given bounding boxes.
 
-    def calculate_IOU_matrix(self, pred_masks, gt_masks, bbs):
+            Inputs:
+                bb1: Tensor [4] (xmin, ymin, xmax, ymax)
+                bb2: Tensor [4] (xmin, ymin, xmax, ymax)   
+        """
+        # calculate intersection
+        x1_1, y1_1, x1_2, y1_2 = bb1[0], bb1[1], bb1[2], bb1[3]
+        x2_1, y2_1, x2_2, y2_2 = bb2[0], bb2[1], bb2[2], bb2[3]
+        x1 = max(x1_1, x2_1)
+        y1 = max(y1_1, y2_1)
+        x2 = min(x1_2, x2_2)
+        y2 = min(y1_2, y2_2)
+        intersection = max(0, x2 - x1 + 1) * max(0, y2 - y1 + 1)
+
+        # calculate union
+        area1 = (x1_2 - x1_1 + 1) * (y1_2 - y1_1 + 1)
+        area2 = (x2_2 - x2_1 + 1) * (y2_2 - y2_1 + 1)
+        union = area1 + area2 - intersection
+
+        iou = intersection / union
+
+        return iou
+        
+
+    def calculate_IOU_matrix(self, pred_masks, gt_masks, pred_bbs, gt_bbs):
         """
             Calculate IOU matrix between prediction masks and GT masks.
             Input:
                 pred_masks: Tensor [K, 1, 64, 64]
                 gt_masks: Tensor [K_gt, 1, 540, 960] (KINS: [250,  828])
-                bbs: Tensor [K, 5]
-                full_mask: bool (if True, shape of gt_masks: [4, 3, 540, 960])
+                pred_bbs: Tensor [K, 5] (img_id, xmin, ymin, xmax, ymax)
+                gt_bbs: Tensor [K_gt, 4] (xmin, ymin, diffx, diffy)
             Output:
                 iou_matrix: Tensor [K, K_gt]
         """
@@ -300,21 +380,24 @@ class Trainer():
         for i in range(num_pred):
             for j in range(num_gt):
                 # if gt_masks[j, 1, 0, 0] == bbs[i, 0]: # check if gt mask is in same image as prediction
-                gt_mask_roi = self.crop_and_resize_mask(gt_masks[j,0], bbs[i])
-                save_image(gt_mask_roi, "test_gt.png")
+                # gt_mask_roi = self.crop_and_resize_mask(gt_masks[j,0], bbs[i])
+                # save_image(gt_mask_roi, "test_gt.png")
                 # save_image(pred_masks[i], "test_pred.png")
-                iou_matrix[i, j] = self.calculate_IOU(pred_masks[i], gt_mask_roi)
+                xmin, ymin, diffx, diffy = gt_bbs[j]
+                gt_bb = torch.tensor([xmin, ymin, xmin+diffx, ymin+diffy])
+                iou_matrix[i, j] = self.calculate_IOU_bbs(pred_bbs[i, 1:], gt_bb)
+                # iou_matrix[i, j] = self.calculate_IOU(pred_masks[i], gt_mask_roi)
                 # test =  self.calculate_IOU(gt_mask_roi, torch.ones_like(gt_mask_roi))
                 # else:
                 #     iou_matrix[i, j] = 0.0
 
         return iou_matrix
     
-    def assign_iou(self, pred_masks, gt_masks,  bbs, iou_threshold=0.0):
+    def assign_iou(self, pred_masks, gt_masks, pred_bbs, gt_bbs, iou_threshold=0.0):
         """
             Assign pred masks to GT masks for loss calculation using IOU matrix and the Hungarian algorithm for optimal assignment.
         """
-        iou_matrix = self.calculate_IOU_matrix(pred_masks, gt_masks, bbs)
+        iou_matrix = self.calculate_IOU_matrix(pred_masks, gt_masks, pred_bbs, gt_bbs)
 
         cost_matrix = 1 - iou_matrix
         # Hungarian algorithm
@@ -329,7 +412,7 @@ class Trainer():
             
         return assigned_masks
     
-    def compute_losses(self, assignment, pred_masks, gt_masks, bbs):
+    def compute_losses(self, assignment, pred_masks, gt_masks, bbs, type):
         """
             Compute the loss for one type of mask (occluder, invisible, amodal).
 
@@ -347,7 +430,7 @@ class Trainer():
             else:
                 gt_mask = self.crop_and_resize_mask(gt_masks[j,0], bbs[i])
                 compare = torch.cat((pred_masks[i], gt_mask), dim=0).unsqueeze(0)
-                save_image(compare, "test_compare.png")
+                save_image(compare, "test_compare_{}.png".format(type))
                 loss += self.compute_loss(pred_masks[i], gt_mask)
         return loss
     
@@ -460,10 +543,16 @@ class Trainer():
         # print(torch.cuda.current_device())
         # clear gpu memory
         # torch.cuda.empty_cache()
+        print("BEFORE TRAIN ",torch.cuda.memory_allocated(self.devices[0])/1.074e+9)
         for epoch_idx in tqdm(range(self.epochs)):
             # for data, anns in self.dataloader:
             running_loss = 0.0
-            for i, (img_batch, anns) in enumerate(tqdm(self.dataloader)):
+            running_loss_a = 0.0
+            running_loss_v = 0.0
+            running_loss_i = 0.0
+            step = 0
+            for (img_batch, anns) in tqdm(self.dataloader):
+                print("AFTER DATA ",torch.cuda.memory_allocated(self.devices[0])/1.074e+9)
                 # 1) Extract masks from annotations
                 """
                 anns: list[dict]
@@ -481,13 +570,15 @@ class Trainer():
                         img_width}
                 """
                 out_dev = self.devices[1]
-                gt_inmodal_masks, gt_amodal_masks = self.get_masks_kins2020(anns)
+                gt_inmodal_masks, gt_amodal_masks, gt_bbs = self.get_masks_kins2020(anns)
                 gt_invis_masks = [a-i for a, i in zip(gt_amodal_masks, gt_inmodal_masks)]
 
                 # move gt masks to gpu
-                gt_inmodal_masks = [m.to(self.devices[1]) for m in gt_inmodal_masks]
-                gt_amodal_masks = [m.to(self.devices[1]) for m in gt_amodal_masks]
-                gt_invis_masks = [m.to(self.devices[1]) for m in gt_invis_masks]
+                # gt_bbs: [xmin, ymin, diffx, diffy]
+                gt_bbs = [((b*2)//3).to('cpu') for b in gt_bbs] # resize bbs to match resized image
+                gt_inmodal_masks = [m.to(out_dev) for m in gt_inmodal_masks]
+                gt_amodal_masks = [m.to(out_dev) for m in gt_amodal_masks]
+                gt_invis_masks = [m.to(out_dev) for m in gt_invis_masks]
 
                 # img_batch size: [B, 3, 540, 960] (ASD), [B, 3, 250, 828] (KINS)
                 img_batch = img_batch
@@ -505,22 +596,49 @@ class Trainer():
                     roi_list.append(torch.cat((id, boxes), dim=1))
 
                 if roi_list:
-                    rois = torch.cat(roi_list, dim=0) # [K, 5] K: #bboxes, 5: first for id and last four for corners
+                    # pred bbs: [xmin, ymin, xmax, ymax]
+                    rois = torch.cat(roi_list, dim=0) # [K, 5] K: #bboxes, 5: first for img id and last four for corners
                 else:
                     continue
+
+                print("AFTER ROI ",torch.cuda.memory_allocated(self.devices[0])/1.074e+9)
+                torch.cuda.empty_cache()
+
+                # # draw bounding boxes on image
+                # x1, y1, x2, y2 = rois[0, 1], rois[0, 2], rois[0, 3], rois[0, 4]
+                # pil_img = Image.fromarray(img_batch[0].permute(1,2,0).numpy(), mode="RGB")
+                # ImageDraw.Draw(pil_img).rectangle([x1, y1, x2, y2], outline=255)
+                # x1, y1, x2, y2 = rois[1, 1], rois[1, 2], rois[1, 3], rois[1, 4]
+                # ImageDraw.Draw(pil_img).rectangle([x1, y1, x2, y2], outline=255)
+                # x1, y1, diffx, diffy = gt_bbs[0][0,0], gt_bbs[0][0,1], gt_bbs[0][0,2], gt_bbs[0][0,3]
+                # ImageDraw.Draw(pil_img).rectangle([x1, y1, x1+diffx, y1+diffy], outline=255, fill=100)
+                # x1, y1, diffx, diffy = gt_bbs[0][1,0], gt_bbs[0][1,1], gt_bbs[0][1,2], gt_bbs[0][1,3]
+                # ImageDraw.Draw(pil_img).rectangle([x1, y1, x1+diffx, y1+diffy], outline=255, fill=100)
+                # x1, y1, diffx, diffy = gt_bbs[0][2,0], gt_bbs[0][2,1], gt_bbs[0][2,2], gt_bbs[0][2,3]
+                # ImageDraw.Draw(pil_img).rectangle([x1, y1, x1+diffx, y1+diffy], outline=255, fill=100)
+                # img_w_bb = torch.tensor(np.array(pil_img), dtype=torch.float).permute(2,0,1).unsqueeze(0)
+                # save_image(img_w_bb, "test_bbs.png")
+
+                
+
+
                 
                 feats = img_batch
                 for l in self.feat_encoder:
                     feats = l(feats)
 
                 f_roi = roi_align(feats, rois, output_size=(self.cfg.MODEL.PARAMS.ROI_OUT_SIZE, self.cfg.MODEL.PARAMS.ROI_OUT_SIZE), spatial_scale=0.25, sampling_ratio=-1,aligned=True) # [K, C, H_r, W_r]
+                if f_roi.shape[0] == 0:
+                    continue
                 # normalize
                 # mean = [0.485, 0.456, 0.406]
                 # std = [0.229, 0.224, 0.225]
                 # f_roi = transforms.Normalize(mean, std)(f_roi)
                 # save_image(f_roi[0], "img_1.png")
                 # masks = self.model(f_roi) # [K, 4, 56, 56], [K, 5]
+                print("BEFORE FW ",torch.cuda.memory_allocated(self.devices[0])/1.074e+9)
                 m_v, m_o, m_a, m_i = self.model(f_roi) # [K, 1, 56, 56], [K, 1, 56, 56], [K, 1, 56, 56], [K, 1, 56, 56]
+                print("AFTER FW ",torch.cuda.memory_allocated(self.devices[0])/1.074e+9)
                 m_v = m_v.squeeze(1)
                 m_o = m_o.squeeze(1)
                 m_a = m_a.squeeze(1)
@@ -536,7 +654,7 @@ class Trainer():
                 #     continue
                 
                 # torch.cuda.empty_cache()
-                rois = rois.to(torch.int).to(self.devices[1])
+                rois = rois.to(torch.int).to('cpu')
                 # K, num_masks, H_m, W_m = masks.shape
                 # m_o = masks[:, 0] # occluder mask (no gt in KINS)
                 # m_v = masks[:, 1] # visible mask (inmodal)
@@ -548,15 +666,15 @@ class Trainer():
                 
                 # 3) calculate the loss
                 # 3.1) assign predicted masks to gt masks using IOU matrix and Hungarian algorithm
-                assigned_masks_a = self.assign_iou(m_a, gt_amodal_masks[0], bbs=rois)
-                assigned_masks_v = self.assign_iou(m_v, gt_inmodal_masks[0], bbs=rois)
-                assigned_masks_i = self.assign_iou(m_i, gt_invis_masks[0], bbs=rois)
+                assigned_masks_a = self.assign_iou(m_a, gt_amodal_masks[0], pred_bbs=rois, gt_bbs=gt_bbs[0], iou_threshold=0.5)
+                assigned_masks_v = self.assign_iou(m_v, gt_inmodal_masks[0], pred_bbs=rois, gt_bbs=gt_bbs[0], iou_threshold=0.5)
+                assigned_masks_i = self.assign_iou(m_i, gt_invis_masks[0], pred_bbs=rois, gt_bbs=gt_bbs[0], iou_threshold=0.5)
 
                 # 3.2) calculate the losses
                 # loss_o = self.compute_losses(assigned_masks_o, m_o, gt_occl_masks, bbs=rois)
-                loss_a = self.compute_losses(assigned_masks_a, m_a, gt_amodal_masks[0], bbs=rois)
-                loss_v = self.compute_losses(assigned_masks_v, m_v, gt_inmodal_masks[0], bbs=rois)
-                loss_i = self.compute_losses(assigned_masks_i, m_i, gt_invis_masks[0], bbs=rois)
+                loss_a = self.compute_losses(assigned_masks_a, m_a, gt_amodal_masks[0], bbs=rois, type="amodal")
+                loss_v = self.compute_losses(assigned_masks_v, m_v, gt_inmodal_masks[0], bbs=rois, type="visible")
+                loss_i = self.compute_losses(assigned_masks_i, m_i, gt_invis_masks[0], bbs=rois, type="invisible")
                 
                 # 3.3) accumulate the losses
                 total_loss = loss_a + loss_v + loss_i
@@ -575,12 +693,19 @@ class Trainer():
                 self.optimizer.step()
 
                 running_loss += total_loss.item()
+                running_loss_a += loss_a.item()
+                running_loss_v += loss_v.item()
+                running_loss_i += loss_i.item()
 
-                writer.add_scalar("Training loss [batch]", total_loss, epoch_idx*len(self.dataloader)+i)
+                print(step)
+                print("STEP: ",(epoch_idx)*len(self.dataloader)+step)
+                writer.add_scalar("Training loss [batch]", total_loss, (epoch_idx)*len(self.dataloader)+step)
                 loss_dict = {"Loss amodal [batch]": loss_a,
                              "Loss visible [batch]": loss_v,
                              "Loss invisible [batch]": loss_i}
-                writer.add_scalars("Individual losses [batch]", loss_dict, epoch_idx*len(self.dataloader)+i)
+                writer.add_scalars("Individual losses [batch]", loss_dict, (epoch_idx)*len(self.dataloader)+step)
+
+                step += 1
 
 
             # save_image(m_v[0], "test_v_{}.png".format(epoch_idx))
@@ -588,22 +713,41 @@ class Trainer():
             # save_image(m_i[0], "test_i_{}.png".format(epoch_idx))
             # save_image(m_o[0], "test_o_{}.png".format(epoch_idx))
             # print(gt_invis_masks[0][assigned_masks_i[0]][None,None].shape)
+            pseudo_mask_o = torch.zeros_like(m_o[0][None])
+            if assigned_masks_a[0] != 'fp':
+                gt_mask_a = self.crop_and_resize_mask(gt_amodal_masks[0][assigned_masks_a[0]].squeeze(0), rois[0])[None]
+            else:
+                gt_mask_a = pseudo_mask_o
+            if assigned_masks_v[0] != 'fp':
+                gt_mask_v = self.crop_and_resize_mask(gt_inmodal_masks[0][assigned_masks_v[0]].squeeze(0), rois[0])[None]
+            else:
+                gt_mask_v = pseudo_mask_o
+            if assigned_masks_i[0] != 'fp':
+                gt_mask_i = self.crop_and_resize_mask(gt_invis_masks[0][assigned_masks_i[0]].squeeze(0), rois[0])[None]
+            else:
+                gt_mask_i = pseudo_mask_o
+            gt_masks = torch.stack((gt_mask_v, gt_mask_a, gt_mask_i, pseudo_mask_o), dim=0)
             # gt_masks = torch.cat((gt_inmodal_masks[0][assigned_masks_v[0]][None,None], gt_amodal_masks[0][assigned_masks_a[0]][None,None], gt_invis_masks[0][assigned_masks_i[0]][None,None], torch.zeros_like(gt_invis_masks[0][assigned_masks_i[0]][None,None])), dim=0)
             # print(gt_masks.shape)
             masks = torch.cat((m_v[0][None,None], m_a[0][None,None], m_i[0][None,None], m_o[0][None,None]), dim=0)
-            writer.add_images("masks", masks, epoch_idx*len(self.dataloader), dataformats="NCHW")
 
-            writer.add_scalar("Training loss [epoch]", running_loss/len(self.dataloader), epoch_idx*len(self.dataloader))
-            loss_dict = {"Loss amodal [epoch]": loss_a,
-                            "Loss visible [epoch]": loss_v,
-                            "Loss invisible [epoch]": loss_i}
-            writer.add_scalars("Individual losses [epoch]", loss_dict, epoch_idx*len(self.dataloader))
+            all_masks = torch.cat((gt_masks, masks), dim=2)
+            writer.add_images("masks [v, a, i, o(no gt)]", all_masks, (epoch_idx+1)*len(self.dataloader), dataformats="NCHW")
+
+            writer.add_scalar("Training loss [epoch]", running_loss/len(self.dataloader), (epoch_idx+1))
+            loss_dict = {"Loss amodal [epoch]": running_loss_a/len(self.dataloader),
+                            "Loss visible [epoch]": running_loss_v/len(self.dataloader),
+                            "Loss invisible [epoch]": running_loss_i/len(self.dataloader)}
+            writer.add_scalars("Individual losses [epoch]", loss_dict, (epoch_idx+1))
 
             self.scheduler.step()
 
-            print("\nLoss after epoch {}: {}\n".format(epoch_idx, running_loss/len(self.dataloader)))
+            print("\nLoss after epoch {}: {:.2f}+{:.2f}+{:.2f} = {:.2f}\n".format(epoch_idx, running_loss_a/len(self.dataloader),
+                                                                   running_loss_v/len(self.dataloader),
+                                                                   running_loss_i/len(self.dataloader),
+                                                                   running_loss/len(self.dataloader)))
 
-            if epoch_idx % self.save_interval == 0:
+            if epoch_idx % self.save_interval == 0 or epoch_idx == self.epochs-1:
                 torch.save(self.model.state_dict(), "{}/aisformer_{}.pth".format(CKP_FOLDER, epoch_idx))
 
 
@@ -626,6 +770,7 @@ if __name__ == "__main__":
     cfg_path="/Midgard/home/tibbe/3damodal/3DAmodal/configs/config.yaml"
     cfg = OmegaConf.load(cfg_path)
     world_size = torch.cuda.device_count()
+    torch.cuda.empty_cache()
 
     if world_size == 0:
         main(-1, world_size, cfg)

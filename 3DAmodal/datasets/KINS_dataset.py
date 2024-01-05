@@ -13,7 +13,7 @@ class KINS(Dataset):
 
         self.root_dir = root_dir
         self.imgs_dir = os.path.join(self.root_dir, mode + "_imgs")
-        self.imgs_lst = os.listdir(self.imgs_dir)[2:3]*10
+        self.imgs_lst = os.listdir(self.imgs_dir)[:200]
 
 
         anns_dir = os.path.join(self.root_dir, "annotations")
@@ -69,6 +69,7 @@ def testing():
     dl = DataLoader(kins_dataset, batch_size=1)
     start = time.time()
     for img, anns in dl:
+        print(anns.keys())
         print("TIME",time.time()-start)
         start = time.time()
         break

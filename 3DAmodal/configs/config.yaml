@@ -8,7 +8,7 @@ MODEL:
         INPUT_H: 250 # 540
         INPUT_W: 828 # 960
         IN_CHANS : 3
-        ROI_OUT_SIZE: 28
+        ROI_OUT_SIZE: 16
         Q_DIM: 3
         EMBED_DIM : 256
         ENCODER_DEPTH : 6
@@ -25,7 +25,7 @@ OPTIMIZER_MOMENTUM:
     BETA2: 0.95
 WEIGHT_DECAY: 5.0e-2 
 BASE_LEARNING_RATE: 1.0e-3
-LEARNING_RATE: 0.005
+LEARNING_RATE: 0.05
 MIN_LEARNING_RATE: 0.0
 LEARNING_RATE_SCHEDULER: cosine decay # Hard coded rn
 EPOCHS: 200
@@ -33,7 +33,7 @@ CHECK_VAL_EVERY_N_EPOCH: 1
 RANDOM_SEED: 42
 DATASET: 
     NAME: datasets.KINS_dataset:KINS # datasets.asd_dataset:AmodalSynthDriveDataset
-    TRAIN: /Midgard/Data/tibbe/datasets/KINS/ # /local_storage/users/tibbe/datasets/AmodalSynthDrive/train/ 
+    TRAIN: /local_storage/users/tibbe/datasets/KINS/ # /local_storage/users/tibbe/datasets/AmodalSynthDrive/train/ 
     # /Midgard/Data/tibbe/datasets/AmodalSynthDrive/train
     TEST: /local_storage/users/tibbe/datasets/AmodalSynthDrive/test/
 BATCH_SIZE: 1
@@ -45,3 +45,5 @@ DISTRIBUTED: True
     # ENABLE: True
     # NUM_DEVICES: 4
 SAVE_INTERVAL: 20
+START_FROM_CKPT: True
+CKPT_PATH: "checkpoints_firstproper/aisformer_199.pth"

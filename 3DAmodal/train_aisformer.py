@@ -272,19 +272,19 @@ class Trainer():
         for key in ann.keys():
             if key == "img_height" or key == "img_width":
                 continue
-            amodal_mask = self.decode_mask_lst(ann[key]['a_segm'], h, w)
-            inmodal_mask = self.decode_mask_lst(ann[key]['i_segm'], h, w)
-            bbs.append(ann[key]['i_bbox'])
-            if amodal_mask:
+            if ann[key]['a_segm'] != "":
+                amodal_mask = self.decode_mask_lst(ann[key]['a_segm'], h, w)
                 amodal_masks.append(amodal_mask)
                 all_amodal += amodal_mask
             else:
                 amodal_masks.append(torch.zeros((1, h, w)))
-            if inmodal_mask:
+            if ann[key]['i_segm'] != "":
+                inmodal_mask = self.decode_mask_lst(ann[key]['i_segm'], h, w)
                 inmodal_masks.append(inmodal_mask)
                 all_inmodal += inmodal_mask
             else:
                 inmodal_masks.append(torch.zeros((1, h, w)))
+            bbs.append(ann[key]['i_bbox'])
         
         amodal_masks = torch.stack(amodal_masks)
         inmodal_masks = torch.stack(inmodal_masks)

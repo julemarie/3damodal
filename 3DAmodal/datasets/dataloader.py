@@ -153,8 +153,7 @@ def get_dataloader(dataset, batch_size, partition="lidar", num_workers=0, shuffl
             num_workers=num_workers,
             drop_last=drop_last, 
             collate_fn=collate,
-            timeout=50
-            # sampler=DistributedSampler(dataset)
+            sampler=DistributedSampler(dataset)
         )
     else:
         dataloader = DataLoader(

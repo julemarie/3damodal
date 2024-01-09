@@ -29,6 +29,24 @@ import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 import os
+# import logging
+
+# logging.basicConfig(
+#         level=logging.DEBUG,
+#         format="%(asctime)s [%(levelname)s] %(message)s",
+#         handlers=[logging.StreamHandler()]
+#     )
+# logger = logging.getLogger(__name__)
+
+cfg_path="/Midgard/home/tibbe/3damodal/3DAmodal/configs/config.yaml"
+cfg = OmegaConf.load(cfg_path)
+
+LOG_LEVEL = cfg.LOG_LEVEL
+
+def log(s):
+    if LOG_LEVEL == "DEBUG":
+        print(s)
+
 
 # logging
 from torch.utils.tensorboard import SummaryWriter
@@ -36,14 +54,13 @@ import datetime
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "caching_allocator"
 
-RUNS_FOLDER = "runs"
-CKP_FOLDER = "checkpoints"
+RUNS_FOLDER = cfg.RUNS_FOLDER
+CKP_FOLDER = cfg.SAVE_CKPT_FOLDER
+
 if not os.path.exists(RUNS_FOLDER):
     os.mkdir(RUNS_FOLDER)
 if not os.path.exists(CKP_FOLDER):
     os.mkdir(CKP_FOLDER)
-
-writer = SummaryWriter("{}/{}".format(RUNS_FOLDER, datetime.datetime.now().strftime("%Y%m%d-%H%M%S")))
 
 
 def ddp_setup(rank, world_size):
@@ -62,9 +79,9 @@ def ddp_setup(rank, world_size):
 
 
 class Trainer():
-    def __init__(self, cfg, device, multi_gpu=False, train=True):
-        print(torch.cuda.memory_allocated(device))
-        torch.autograd.set_detect_anomaly(True)
+    def __init__(self, cfg, device, multi_gpu=False, writer=SummaryWriter(), train=True):
+        # torch.autograd.set_detect_anomaly(True)
+        self.writer = writer
         if device == -1:
             device = torch.device("cpu")
         self.cfg = cfg
@@ -78,29 +95,34 @@ class Trainer():
         #     print(name)
         self.backbone.eval()
         resnet = resnet50(pretrained=True)
+        rgbd_conv = nn.Conv2d(4, 64, kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False)
         self.feat_encoder = nn.ModuleList([resnet.conv1, resnet.bn1, resnet.relu, resnet.maxpool, resnet.layer1])
         # ROIAlign takes images and ROIs as input and outputs a tensor of size [K, in_chans, (OUT_SIZE)] where K = #bboxes
         # self.roi_align = RoIAlign(output_size=(self.cfg.MODEL.PARAMS.ROI_OUT_SIZE, self.cfg.MODEL.PARAMS.ROI_OUT_SIZE), spatial_scale=3, sampling_ratio=2,aligned=True)
         
         # init model and move it to device
-        print("BEFORE MODEL ",torch.cuda.memory_allocated(device)/1.074e+9)
+        log("BEFORE MODEL: {}".format(torch.cuda.memory_allocated(device)/1.074e+9))
         if multi_gpu:
-            self.devices = [device*2, device*2+1]
+            if cfg.DISTRIBUTED.MODEL:
+                self.devices = [device*2, device*2+1]
+            elif cfg.DISTRIBUTED.DATA:
+                self.devices = [device, device]
         else:
             self.devices = [device, device]
-        self.model = AISFormer_orig(self.devices)
-        # for name, param in self.model.named_parameters():
-        #     print(f"Name: {name}, device: {param.device}")
-        # self.model.to(self.gpu_id)
-        if multi_gpu:
-            self.model = DDP(self.model)
-
-        print("AFTER MODEL ",torch.cuda.memory_allocated(device)/1.074e+9)
-
+        self.model = AISFormer_orig(self.devices, cfg)
+        
         # load checkpoint if specified
         if self.cfg.START_FROM_CKPT:
             self.model.load_state_dict(torch.load(self.cfg.CKPT_PATH))
             print("Loaded checkpoint from {}".format(self.cfg.CKPT_PATH))
+
+        if multi_gpu:
+            if cfg.DISTRIBUTED.MODEL:
+                self.model = DDP(self.model)
+            elif cfg.DISTRIBUTED.DATA:
+                self.model = DDP(self.model, device_ids=[device], output_device=device)
+
+        log("AFTER MODEL: {}".format(torch.cuda.memory_allocated(device)/1.074e+9))
         
         # init dataloader
         if train:
@@ -110,9 +132,12 @@ class Trainer():
         else:
             raise NotImplementedError
 
-        print("BEFORE DATLOADER ",torch.cuda.memory_allocated(device)/1.074e+9)
-        self.dataloader = get_dataloader(dataset, batch_size=1, num_workers=1, partition="image", distributed=self.cfg.DISTRIBUTED)
-        print("AFTER DATLOADER ",torch.cuda.memory_allocated(device)/1.074e+9)
+        log("BEFORE DATLOADER: {}".format(torch.cuda.memory_allocated(device)/1.074e+9))
+        if multi_gpu:
+            self.dataloader = get_dataloader(dataset, batch_size=self.cfg.BATCH_SIZE, num_workers=1, partition="image", distributed=self.cfg.DISTRIBUTED.DATA)
+        else:
+            self.dataloader = get_dataloader(dataset, batch_size=self.cfg.BATCH_SIZE, num_workers=1, partition="image", distributed=False)
+        log("AFTER DATLOADER: {}".format(torch.cuda.memory_allocated(device)/1.074e+9))
         # self.resize = transforms.Resize((64, 64))
         self.roi_size = tuple((self.cfg.MODEL.PARAMS.ROI_OUT_SIZE*2, self.cfg.MODEL.PARAMS.ROI_OUT_SIZE*2))
 
@@ -165,10 +190,10 @@ class Trainer():
         # save_image(mask_w_bb, "test_maskwbb.png")
         # crop
         cropped_mask = mask[y1:y2, x1:x2].unsqueeze(0)
-        save_image(cropped_mask, "test_crop.png")
+        # save_image(cropped_mask, "test_crop.png")
         # resize
         resized_mask = transforms.Resize(self.roi_size)(cropped_mask)
-        save_image(resized_mask, "test_resizecrop.png")
+        # save_image(resized_mask, "test_resizecrop.png")
 
         resized_mask = resized_mask.squeeze(0)
 
@@ -241,9 +266,9 @@ class Trainer():
         amodal_mask = self.mask_tf(amodal_mask)
         seg_masks = self.mask_tf(seg_masks)
         inmodal_masks = self.mask_tf(inmodal_masks)
-        save_image(inmodal_seg[0], "test_inmod.png")
-        save_image(amodal_mask, "test_amod.png")
-        save_image(segmentation[0], "test_seg.png")
+        # save_image(inmodal_seg[0], "test_inmod.png")
+        # save_image(amodal_mask, "test_amod.png")
+        # save_image(segmentation[0], "test_seg.png")
         # combined_seg = torch.einsum('nchw->chw', seg_masks)
         # combined_inmodal = torch.einsum('nchw->chw', inmodal_masks)
 
@@ -329,8 +354,8 @@ class Trainer():
         # binarize masks
         mask2[mask2 < 0.5] = 0
         mask2[mask2 >= 0.5] = 1
-        save_image(mask1, "test_mask1_pred.png")
-        save_image(mask2, "test_mask2_gt.png")
+        # save_image(mask1, "test_mask1_pred.png")
+        # save_image(mask2, "test_mask2_gt.png")
         intersection = (mask1.int() & mask2.int()).float().sum((0,1))
         union = (mask1.int() | mask2.int()).float().sum((0,1))
         iou = (intersection + 1e-6) / (union + 1e-6)
@@ -430,7 +455,7 @@ class Trainer():
             else:
                 gt_mask = self.crop_and_resize_mask(gt_masks[j,0], bbs[i])
                 compare = torch.cat((pred_masks[i], gt_mask), dim=0).unsqueeze(0)
-                save_image(compare, "test_compare_{}.png".format(type))
+                # save_image(compare, "test_compare_{}.png".format(type))
                 loss += self.compute_loss(pred_masks[i], gt_mask)
         return loss
     
@@ -529,21 +554,16 @@ class Trainer():
 
         return x
     
+    # def compute_average_recall(self, iou_matrix, iou_threshold=0.5):
+
+    
     def train_kins(self):
         self.model.train()
-        # model_dict = self.model.state_dict()
-        # for param, name in zip(self.model.parameters(), model_dict.keys()):
-        #     print("Before {}: {}".format(name, param.requires_grad))
-        #     param.requires_grad = True
-        #     print("After {}: {}".format(name, param.grad_fn))
-        # for param, name in zip(self.backbone.parameters(), self.backbone.state_dict().keys()):
-        #     print("{}: {}".format(name, param.requires_grad))
-        # model_dict = self.model.state_dict()
         print("Starting training on GPU:{}...".format(self.devices))
         # print(torch.cuda.current_device())
         # clear gpu memory
         # torch.cuda.empty_cache()
-        print("BEFORE TRAIN ",torch.cuda.memory_allocated(self.devices[0])/1.074e+9)
+        log("BEFORE TRAIN: {}".format(torch.cuda.memory_allocated(self.devices[0])/1.074e+9))
         for epoch_idx in tqdm(range(self.epochs)):
             # for data, anns in self.dataloader:
             running_loss = 0.0
@@ -552,7 +572,8 @@ class Trainer():
             running_loss_i = 0.0
             step = 0
             for (img_batch, anns) in tqdm(self.dataloader):
-                print("AFTER DATA ",torch.cuda.memory_allocated(self.devices[0])/1.074e+9)
+                # print("EFFECTIVE BATCH SIZE GPU{}: {}".format(self.devices[0],img_batch.shape[0]))
+                log("AFTER DATA: {}".format(torch.cuda.memory_allocated(self.devices[0])/1.074e+9))
                 # 1) Extract masks from annotations
                 """
                 anns: list[dict]
@@ -582,7 +603,7 @@ class Trainer():
 
                 # img_batch size: [B, 3, 540, 960] (ASD), [B, 3, 250, 828] (KINS)
                 img_batch = img_batch
-                save_image(img_batch[0], "img_0.png")
+                # save_image(img_batch[0], "img_0_{}.png".format(self.devices[0]))
 
                 # self.optimizer.zero_grad()
                 
@@ -601,7 +622,7 @@ class Trainer():
                 else:
                     continue
 
-                print("AFTER ROI ",torch.cuda.memory_allocated(self.devices[0])/1.074e+9)
+                log("AFTER ROI: {}".format(torch.cuda.memory_allocated(self.devices[0])/1.074e+9))
                 torch.cuda.empty_cache()
 
                 # # draw bounding boxes on image
@@ -636,9 +657,9 @@ class Trainer():
                 # f_roi = transforms.Normalize(mean, std)(f_roi)
                 # save_image(f_roi[0], "img_1.png")
                 # masks = self.model(f_roi) # [K, 4, 56, 56], [K, 5]
-                print("BEFORE FW ",torch.cuda.memory_allocated(self.devices[0])/1.074e+9)
+                log("BEFORE FW: {}".format(torch.cuda.memory_allocated(self.devices[0])/1.074e+9))
                 m_v, m_o, m_a, m_i = self.model(f_roi) # [K, 1, 56, 56], [K, 1, 56, 56], [K, 1, 56, 56], [K, 1, 56, 56]
-                print("AFTER FW ",torch.cuda.memory_allocated(self.devices[0])/1.074e+9)
+                log("AFTER FW: {}".format(torch.cuda.memory_allocated(self.devices[0])/1.074e+9))
                 m_v = m_v.squeeze(1)
                 m_o = m_o.squeeze(1)
                 m_a = m_a.squeeze(1)
@@ -697,13 +718,11 @@ class Trainer():
                 running_loss_v += loss_v.item()
                 running_loss_i += loss_i.item()
 
-                print(step)
-                print("STEP: ",(epoch_idx)*len(self.dataloader)+step)
-                writer.add_scalar("Training loss [batch]", total_loss, (epoch_idx)*len(self.dataloader)+step)
+                self.writer.add_scalar("Training loss [batch]", total_loss, (epoch_idx)*len(self.dataloader)+step)
                 loss_dict = {"Loss amodal [batch]": loss_a,
                              "Loss visible [batch]": loss_v,
                              "Loss invisible [batch]": loss_i}
-                writer.add_scalars("Individual losses [batch]", loss_dict, (epoch_idx)*len(self.dataloader)+step)
+                self.writer.add_scalars("Individual losses [batch]", loss_dict, (epoch_idx)*len(self.dataloader)+step)
 
                 step += 1
 
@@ -732,13 +751,13 @@ class Trainer():
             masks = torch.cat((m_v[0][None,None], m_a[0][None,None], m_i[0][None,None], m_o[0][None,None]), dim=0)
 
             all_masks = torch.cat((gt_masks, masks), dim=2)
-            writer.add_images("masks [v, a, i, o(no gt)]", all_masks, (epoch_idx+1)*len(self.dataloader), dataformats="NCHW")
+            self.writer.add_images("masks [v, a, i, o(no gt)]", all_masks, (epoch_idx+1)*len(self.dataloader), dataformats="NCHW")
 
-            writer.add_scalar("Training loss [epoch]", running_loss/len(self.dataloader), (epoch_idx+1))
+            self.writer.add_scalar("Training loss [epoch]", running_loss/len(self.dataloader), (epoch_idx+1))
             loss_dict = {"Loss amodal [epoch]": running_loss_a/len(self.dataloader),
                             "Loss visible [epoch]": running_loss_v/len(self.dataloader),
                             "Loss invisible [epoch]": running_loss_i/len(self.dataloader)}
-            writer.add_scalars("Individual losses [epoch]", loss_dict, (epoch_idx+1))
+            self.writer.add_scalars("Individual losses [epoch]", loss_dict, (epoch_idx+1))
 
             self.scheduler.step()
 
@@ -747,37 +766,51 @@ class Trainer():
                                                                    running_loss_i/len(self.dataloader),
                                                                    running_loss/len(self.dataloader)))
 
-            if epoch_idx % self.save_interval == 0 or epoch_idx == self.epochs-1:
-                torch.save(self.model.state_dict(), "{}/aisformer_{}.pth".format(CKP_FOLDER, epoch_idx))
+            if self.devices[0] == 0: # only save model on gpu 0
+                if epoch_idx % self.save_interval == 0 or epoch_idx == self.epochs-1:
+                    torch.save(self.model.state_dict(), "{}/aisformer_{}.pth".format(CKP_FOLDER, epoch_idx))
 
 
 def main(rank: int, world_size: int, cfg: OmegaConf):
     if world_size > 1:
         ddp_setup(rank, world_size)
+        writer = SummaryWriter("{}/{}".format(RUNS_FOLDER, datetime.datetime.now().strftime("%Y%m%d-%H%M%S")))
         print("Init the Trainer...")
-        trainer = Trainer(cfg=cfg, device=rank, multi_gpu=True)
+        trainer = Trainer(cfg=cfg, device=rank, multi_gpu=True, writer=writer)
     else:
+        writer = SummaryWriter("{}/{}".format(RUNS_FOLDER, datetime.datetime.now().strftime("%Y%m%d-%H%M%S")))
         print("Init the Trainer...")
-        trainer = Trainer(cfg=cfg, device=rank, multi_gpu=False)
-    print("Starting training...")
+        trainer = Trainer(cfg=cfg, device=rank, multi_gpu=False, writer=writer)
+        
     trainer.train_kins()
+
+    writer.close()
 
     if world_size > 1:
         destroy_process_group()
 
 
 if __name__ == "__main__":
-    cfg_path="/Midgard/home/tibbe/3damodal/3DAmodal/configs/config.yaml"
-    cfg = OmegaConf.load(cfg_path)
     world_size = torch.cuda.device_count()
     torch.cuda.empty_cache()
+    # log_level = logging.getLevelName(cfg.LOG_LEVEL)
+    # logging.basicConfig(
+    #     level=logging.INFO,
+    #     format="%(asctime)s [%(levelname)s] %(message)s",
+    #     handlers=[logging.StreamHandler()]
+    # )
 
     if world_size == 0:
         main(-1, world_size, cfg)
     elif world_size == 1:
         main(0, world_size, cfg)
     else:
-        world_size = world_size//2
-        mp.spawn(main, args=(world_size, cfg), nprocs=world_size)
+        if cfg.DISTRIBUTED.MODEL: # split model across 2 gpus
+            assert world_size == 2, "Only 2 gpus supported for model parallelism"
+            world_size = world_size//2
+            mp.spawn(main, args=(world_size, cfg), nprocs=world_size)
+        elif cfg.DISTRIBUTED.DATA: # split data across n gpus
+            # cfg.BATCH_SIZE = cfg.BATCH_SIZE*world_size
+            mp.spawn(main, args=(world_size, cfg), nprocs=world_size)
 
-    writer.close()
+    

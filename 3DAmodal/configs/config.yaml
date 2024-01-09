@@ -11,13 +11,9 @@ MODEL:
         ROI_OUT_SIZE: 16
         Q_DIM: 3
         EMBED_DIM : 256
-        ENCODER_DEPTH : 6
-        ENCODER_HIDDEN_DIM : 1
-        ENCODER_NUM_HEADS : 4
-        DECODER_EMBED_DIM : 256
-        DECODER_DEPTH : 6
-        DECODER_HIDDEN_DIM : 1
-        DECODER_NUM_HEADS : 4
+        NUM_HEADS: 1
+        NUM_LAYERS: 1
+        NUM_OUTPUT_MASKS: 4
 # Training params
 OPTIMIZER: SGD # Hard coded rn
 OPTIMIZER_MOMENTUM:
@@ -28,7 +24,7 @@ BASE_LEARNING_RATE: 1.0e-3
 LEARNING_RATE: 0.05
 MIN_LEARNING_RATE: 0.0
 LEARNING_RATE_SCHEDULER: cosine decay # Hard coded rn
-EPOCHS: 200
+EPOCHS: 2000
 CHECK_VAL_EVERY_N_EPOCH: 1
 RANDOM_SEED: 42
 DATASET: 
@@ -41,9 +37,12 @@ OUTPUT_DIR:
     TRAINING: "./outputs/training/"
     TESTING: "./outputs/testing/"
 DEVICE: 'cuda'
-DISTRIBUTED: True
-    # ENABLE: True
-    # NUM_DEVICES: 4
+DISTRIBUTED:
+    MODEL: False
+    DATA: True
 SAVE_INTERVAL: 20
 START_FROM_CKPT: True
-CKPT_PATH: "checkpoints_firstproper/aisformer_199.pth"
+CKPT_PATH: "/Midgard/home/tibbe/3damodal/3DAmodal/checkpoints_firstproper/aisformer_199.pth"
+SAVE_CKPT_FOLDER: "/Midgard/home/tibbe/3damodal/3DAmodal/checkpoints"
+RUNS_FOLDER: "/Midgard/home/tibbe/3damodal/3DAmodal/runs"
+LOG_LEVEL: INFO

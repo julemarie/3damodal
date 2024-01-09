@@ -6,6 +6,9 @@ cocoapi/
 runs/
 checkpoints*/
 testing.py
+# don't save slurm log files
+*.err
+*.out
 
 .vscode/
 

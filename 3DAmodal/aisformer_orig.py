@@ -30,7 +30,7 @@ import matplotlib.pyplot as plt
 
 
 class AISFormer(nn.Module):
-    def __init__(self, devices):
+    def __init__(self, devices, cfg):
         super(AISFormer, self).__init__()
         # fmt: off
         # num_classes       = cfg.MODEL.ROI_HEADS.NUM_CLASSES
@@ -43,15 +43,17 @@ class AISFormer(nn.Module):
         # self.num_mask_classes = num_mask_classes
         # self.aisformer = cfg.MODEL.AISFormer
         # fmt: on
+        self.cfg = cfg
+        self.log_level = cfg.LOG_LEVEL
 
         self.devs = devices
         self.num_dev = len(devices)
         self.num_ops = 8
 
-        conv_dims = 256
-        num_mask_classes = 1
-        num_heads = 8
-        num_layers = 1
+        # num_mask_classes = 1
+        conv_dims = cfg.MODEL.PARAMS.EMBED_DIM
+        num_heads = cfg.MODEL.PARAMS.NUM_HEADS
+        num_layers = cfg.MODEL.PARAMS.NUM_LAYERS
         
 
         # deconv
@@ -62,7 +64,7 @@ class AISFormer(nn.Module):
         weight_init.c2_msra_fill(self.deconv_for_TR[0])
 
         # feature map fcn
-        self.mask_feat_learner_TR = Conv2d(256, 256, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), activation=nn.ReLU()).to(device=self.devs[0])
+        self.mask_feat_learner_TR = Conv2d(conv_dims, conv_dims, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), activation=nn.ReLU()).to(device=self.devs[0])
         weight_init.c2_msra_fill(self.mask_feat_learner_TR)
 
         # mask predictor
@@ -72,23 +74,23 @@ class AISFormer(nn.Module):
         #     nn.init.constant_(self.predictor_TR.bias, 0)
 
         # pixel embedding
-        self.pixel_embed = nn.Conv2d(256, 256, kernel_size=(1, 1), stride=(1, 1)).to(device=self.devs[1])
+        self.pixel_embed = nn.Conv2d(conv_dims, conv_dims, kernel_size=(1, 1), stride=(1, 1)).to(device=self.devs[1])
         nn.init.normal_(self.pixel_embed.weight, std=0.001)
         if self.pixel_embed.bias is not None:
             nn.init.constant_(self.pixel_embed.bias, 0)
 
         # mask embedding
-        self.mask_embed = MLP(256,256,256,3).to(device=self.devs[1])
+        self.mask_embed = MLP(conv_dims,conv_dims,conv_dims,3).to(device=self.devs[1])
         for layer in self.mask_embed.layers:
             torch.nn.init.xavier_uniform_(layer.weight)
 
         # subtract modeling
-        self.subtract_model = MLP(512, 256, 256, 2).to(device=self.devs[1])
+        self.subtract_model = MLP(2*conv_dims, conv_dims, conv_dims, 2).to(device=self.devs[1])
         for layer in self.subtract_model.layers:
             torch.nn.init.xavier_uniform_(layer.weight)
 
         # norm rois
-        self.norm_rois = nn.LayerNorm(256).to(device=self.devs[1])
+        self.norm_rois = nn.LayerNorm(conv_dims).to(device=self.devs[1])
 
 
         # transformer layers
@@ -101,9 +103,12 @@ class AISFormer(nn.Module):
         decoder_layer = TransformerDecoderLayer(d_model=emb_dim, nhead=num_heads, normalize_before=False)
         self.transformer_decoder = TransformerDecoder(decoder_layer, num_layers=num_layers).to(device=self.devs[1]) # 6 is the default of detr
 
-        n_output_masks = 4 # 4 embeddings, vi_mask, occluder, a_mask, invisible_mask
+        n_output_masks = cfg.MODEL.PARAMS.NUM_OUTPUT_MASKS # 4 embeddings, vi_mask, occluder, a_mask, invisible_mask
         self.query_embed = nn.Embedding(num_embeddings=n_output_masks, embedding_dim=emb_dim).to(device=self.devs[1])
 
+    def log(self, msg):
+        if self.log_level == "DEBUG":
+            print(msg)
 
     def forward(self, x):
         bs, emb_dim, spat_size, spat_size = x.shape
@@ -113,12 +118,13 @@ class AISFormer(nn.Module):
         # spat_size = x_ori.shape[-1]
 
         x = x.to(device=self.devs[0])
-        print("AFTER FEAT ",torch.cuda.memory_allocated(self.devs[0])/1.074e+9)
+        self.log("AFTER FEAT: {}".format(torch.cuda.memory_allocated(self.devs[0])/1.074e+9))
 
         # short range learning
         x = self.mask_feat_learner_TR(x)
         x = self.deconv_for_TR(x)
-        print("AFTER CONV ",torch.cuda.memory_allocated(self.devs[0])/1.074e+9)
+        self.log("AFTER CONV: {}".format(torch.cuda.memory_allocated(self.devs[0])/1.074e+9))
+
         # position emb
         pos_embed = self.positional_encoding.forward_tensor(x)
         pos_embed = pos_embed.flatten(2).permute(2, 0, 1)
@@ -128,8 +134,8 @@ class AISFormer(nn.Module):
         encoded_feat_embs = self.transformer_encoder(feat_embs, 
                                                     pos=pos_embed)
         
-        print("AFTER ENC ",torch.cuda.memory_allocated(self.devs[0])/1.074e+9)
-        print("AFTER ENC MAX ",torch.cuda.max_memory_allocated(self.devs[0])/1.074e+9)
+        self.log("AFTER ENC: {}".format(torch.cuda.memory_allocated(self.devs[0])/1.074e+9))
+        self.log("AFTER ENC MAX: {}".format(torch.cuda.memory_allocated(self.devs[0])/1.074e+9))
 
         encoded_feat_embs = encoded_feat_embs.to(device=self.devs[1])
         pos_embed = pos_embed.to(device=self.devs[1])
@@ -144,7 +150,7 @@ class AISFormer(nn.Module):
 
         x = x.to(device=self.devs[1])
         # predict mask
-        roi_embeding =  encoded_feat_embs.permute(1,2,0).unflatten(-1, (16*2,16*2))
+        roi_embeding =  encoded_feat_embs.permute(1,2,0).unflatten(-1, (self.cfg.MODEL.PARAMS.ROI_OUT_SIZE*2,self.cfg.MODEL.PARAMS.ROI_OUT_SIZE*2))
         roi_embeding = roi_embeding + x # long range + short range
         roi_embeding = self.norm_rois(roi_embeding.permute(0,2,3,1)).permute(0,3,1,2)
         roi_embeding = self.pixel_embed(roi_embeding)

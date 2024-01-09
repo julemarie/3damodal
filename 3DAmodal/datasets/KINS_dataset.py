@@ -13,7 +13,7 @@ class KINS(Dataset):
 
         self.root_dir = root_dir
         self.imgs_dir = os.path.join(self.root_dir, mode + "_imgs")
-        self.imgs_lst = os.listdir(self.imgs_dir)[:200]
+        self.imgs_lst = os.listdir(self.imgs_dir)[3:4]*4
 
 
         anns_dir = os.path.join(self.root_dir, "annotations")

@@ -47,7 +47,6 @@ def log(s):
     if LOG_LEVEL == "DEBUG":
         print(s)
 
-
 # logging
 from torch.utils.tensorboard import SummaryWriter
 import datetime
@@ -113,7 +112,11 @@ class Trainer():
         
         # load checkpoint if specified
         if self.cfg.START_FROM_CKPT:
-            self.model.load_state_dict(torch.load(self.cfg.CKPT_PATH))
+            state_dict = torch.load(self.cfg.CKPT_PATH)
+            for key in list(state_dict.keys()):
+                if "module" in key:
+                    state_dict[key.replace("module.", "")] = state_dict.pop(key)
+            self.model.load_state_dict(state_dict)
             print("Loaded checkpoint from {}".format(self.cfg.CKPT_PATH))
 
         if multi_gpu:
@@ -408,9 +411,12 @@ class Trainer():
                 # gt_mask_roi = self.crop_and_resize_mask(gt_masks[j,0], bbs[i])
                 # save_image(gt_mask_roi, "test_gt.png")
                 # save_image(pred_masks[i], "test_pred.png")
-                xmin, ymin, diffx, diffy = gt_bbs[j]
-                gt_bb = torch.tensor([xmin, ymin, xmin+diffx, ymin+diffy])
-                iou_matrix[i, j] = self.calculate_IOU_bbs(pred_bbs[i, 1:], gt_bb)
+                if pred_bbs is not None:
+                    xmin, ymin, diffx, diffy = gt_bbs[j]
+                    gt_bb = torch.tensor([xmin, ymin, xmin+diffx, ymin+diffy])
+                    iou_matrix[i, j] = self.calculate_IOU_bbs(pred_bbs[i, 1:], gt_bb)
+                else:
+                    iou_matrix[i, j] = self.calculate_IOU(pred_masks[i], gt_masks[j,0])
                 # iou_matrix[i, j] = self.calculate_IOU(pred_masks[i], gt_mask_roi)
                 # test =  self.calculate_IOU(gt_mask_roi, torch.ones_like(gt_mask_roi))
                 # else:
@@ -553,8 +559,6 @@ class Trainer():
         x = x.reshape(x.shape[0], self.cfg.MODEL.PARAMS.ROI_OUT_SIZE*2, self.cfg.MODEL.PARAMS.ROI_OUT_SIZE*2)
 
         return x
-    
-    # def compute_average_recall(self, iou_matrix, iou_threshold=0.5):
 
     
     def train_kins(self):
@@ -639,10 +643,6 @@ class Trainer():
                 # ImageDraw.Draw(pil_img).rectangle([x1, y1, x1+diffx, y1+diffy], outline=255, fill=100)
                 # img_w_bb = torch.tensor(np.array(pil_img), dtype=torch.float).permute(2,0,1).unsqueeze(0)
                 # save_image(img_w_bb, "test_bbs.png")
-
-                
-
-
                 
                 feats = img_batch
                 for l in self.feat_encoder:
@@ -770,7 +770,102 @@ class Trainer():
                 if epoch_idx % self.save_interval == 0 or epoch_idx == self.epochs-1:
                     torch.save(self.model.state_dict(), "{}/aisformer_{}.pth".format(CKP_FOLDER, epoch_idx))
 
+        
+    def test_kins(self):
+        self.model.eval()
 
+        TP = 0
+        FP = 0
+        precision_lst = []
+        recall_lst = []
+
+        for n, (img_batch, anns) in enumerate(self.dataloader):
+            out_dev = self.devices[1]
+            gt_inmodal_masks, gt_amodal_masks, gt_bbs = self.get_masks_kins2020(anns)
+            gt_invis_masks = [a-i for a, i in zip(gt_amodal_masks, gt_inmodal_masks)]
+
+            # move gt masks to gpu
+            # gt_bbs: [xmin, ymin, diffx, diffy]
+            gt_bbs = [((b*2)//3).to('cpu') for b in gt_bbs] # resize bbs to match resized image
+            gt_inmodal_masks = [m.to(out_dev) for m in gt_inmodal_masks]
+            gt_amodal_masks = [m.to(out_dev) for m in gt_amodal_masks]
+            gt_invis_masks = [m.to(out_dev) for m in gt_invis_masks]
+
+            thresh = 0.9
+            x = self.backbone(img_batch)
+            roi_list = []
+            for i, ann in enumerate(x):
+                boxes = ann["boxes"][torch.where(ann["scores"] > thresh)]
+                id = i*torch.ones((boxes.shape[0]), dtype=torch.int, device='cpu').unsqueeze(-1)
+                roi_list.append(torch.cat((id, boxes), dim=1))
+
+            if roi_list:
+                # pred bbs: [xmin, ymin, xmax, ymax]
+                rois = torch.cat(roi_list, dim=0) # [K, 5] K: #bboxes, 5: first for img id and last four for corners
+            else:
+                continue
+            
+            feats = img_batch
+            for l in self.feat_encoder:
+                feats = l(feats)
+
+            f_roi = roi_align(feats, rois, output_size=(self.cfg.MODEL.PARAMS.ROI_OUT_SIZE, self.cfg.MODEL.PARAMS.ROI_OUT_SIZE), spatial_scale=0.25, sampling_ratio=-1,aligned=True) # [K, C, H_r, W_r]
+            if f_roi.shape[0] == 0:
+                continue
+            
+            m_v, m_o, m_a, m_i = self.model(f_roi) # [K, 1, 56, 56], [K, 1, 56, 56], [K, 1, 56, 56], [K, 1, 56, 56]
+            
+            m_v = m_v.squeeze(1)
+            m_o = m_o.squeeze(1)
+            m_a = m_a.squeeze(1)
+            m_i = m_i.squeeze(1)
+
+            # min max normalize between 0 and 1
+            m_v = self.normalize(m_v)
+            m_o = self.normalize(m_o)
+            m_a = self.normalize(m_a)
+            m_i = self.normalize(m_i)
+
+            iou_matrix = self.calculate_IOU_matrix(m_a, gt_amodal_masks[0], pred_bbs=None, gt_bbs=None)
+            iou_threshold = 0.5
+            # calculate TP and FP
+            for i in range(iou_matrix.shape[0]):
+                col = iou_matrix[i].argmax()
+                if iou_matrix[i].max() >= iou_threshold:
+                    if iou_matrix[i, col] == iou_matrix[:, col].max():
+                        TP += 1
+                    else:
+                        FP += 1
+                else:
+                    FP += 1
+                
+                recall = TP/gt_amodal_masks[0].shape[0]
+                precision = TP/(TP+FP)
+                precision_lst.append(precision)
+                recall_lst.append(recall)
+
+        # calculate average precision using 11-point interpolation
+        # sort precision and recall lists
+        precision_lst = np.array(precision_lst)
+        recall_lst = np.array(recall_lst)
+        idx = np.argsort(recall_lst)
+        precision_lst = precision_lst[idx]
+        recall_lst = recall_lst[idx]
+        # calculate average precision
+        ap = 0
+        for r in np.linspace(0, 1, 11):
+            p = precision_lst[recall_lst >= r].max()
+            if p is None:
+                p = 0
+            ap += p/11
+
+        # calculate average recall
+        ar = recall_lst.max()
+
+        
+        print("Average precision: {}".format(ap))
+
+        
 def main(rank: int, world_size: int, cfg: OmegaConf):
     if world_size > 1:
         ddp_setup(rank, world_size)

@@ -29,6 +29,7 @@ import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 import os
+from collections import OrderedDict
 # import logging
 
 # logging.basicConfig(
@@ -113,11 +114,19 @@ class Trainer():
         # load checkpoint if specified
         if self.cfg.START_FROM_CKPT:
             state_dict = torch.load(self.cfg.CKPT_PATH)
-            for key in list(state_dict.keys()):
-                if "module" in key:
-                    state_dict[key.replace("module.", "")] = state_dict.pop(key)
-            self.model.load_state_dict(state_dict)
-            print("Loaded checkpoint from {}".format(self.cfg.CKPT_PATH))
+            new_state_dict = OrderedDict()
+            for key in state_dict['model'].keys():
+                if "mask_head_model" in key:
+                    if "predictor" not in key:
+                        new_state_dict[key.replace("roi_heads.mask_head.mask_head_model.", "")] = state_dict['model'][key]
+            self.model.load_state_dict(new_state_dict)
+
+            # state_dict = torch.load(self.cfg.CKPT_PATH)
+            # for key in list(state_dict.keys()):
+            #     if "module" in key:
+            #         state_dict[key.replace("module.", "")] = state_dict.pop(key)
+            # self.model.load_state_dict(state_dict)
+            # print("Loaded checkpoint from {}".format(self.cfg.CKPT_PATH))
 
         if multi_gpu:
             if cfg.DISTRIBUTED.MODEL:
@@ -212,12 +221,12 @@ class Trainer():
                 gt_mask: Tensor [H, W]
         """
         # compute binnary cross entropy loss
-        # loss = torch.nn.functional.binary_cross_entropy(pred_mask, gt_mask)
+        loss = torch.nn.functional.binary_cross_entropy(pred_mask, gt_mask)
         # define weight as avg number of black pixels / avg number of all pixels
-        all_pixels = gt_mask.shape[0]*gt_mask.shape[1]
-        black_pixels = all_pixels - gt_mask.sum()
-        weight = black_pixels / all_pixels
-        loss = torch.nn.functional.binary_cross_entropy_with_logits(pred_mask, gt_mask, weight=weight)
+        # all_pixels = gt_mask.shape[0]*gt_mask.shape[1]
+        # black_pixels = all_pixels - gt_mask.sum()
+        # weight = black_pixels / all_pixels
+        # loss = torch.nn.functional.binary_cross_entropy_with_logits(pred_mask, gt_mask, weight=weight)
         # compute cross entropy loss
         # loss = torch.nn.functional.cross_entropy(pred_mask, gt_mask)
         # compute dice loss

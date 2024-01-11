@@ -15,6 +15,7 @@ from pytorch_toolbelt.modules import AddCoords
 from detectron2.layers.dice_loss import DiceBCELoss
 from detectron2.layers.transformer import *
 
+from collections import OrderedDict
 import copy
 from typing import Optional, List
 from torch import Tensor
@@ -23,6 +24,7 @@ from detectron2.layers.position_encoding import PositionEmbeddingSine, PositionE
 from detectron2.layers.maskencoding import DctMaskEncoding
 from detectron2.layers.mlp import MLP
 
+from omegaconf import OmegaConf
 
 import os
 import matplotlib.pyplot as plt
@@ -176,10 +178,20 @@ class AISFormer(nn.Module):
 
 
 def test():
-    x = torch.randn(2, 256, 28, 28)
+    x = torch.randn(2, 256, 16, 16)
+    cfg = OmegaConf.load("3DAmodal/configs/config.yaml")
     devices = ['cpu', 'cpu']
-    model = AISFormer(devices)
+    model = AISFormer(devices, cfg)
+    model_state_dict = model.state_dict()
+    state_dict = torch.load("3DAmodal/aisformer_r50_kins.pth", map_location='cpu')
+    new_state_dict = OrderedDict()
+    
+    for key in state_dict['model'].keys():
+        if "mask_head_model" in key:
+            if "predictor" not in key:
+                new_state_dict[key.replace("roi_heads.mask_head.mask_head_model.", "")] = state_dict['model'][key]
     # model.to(device='cuda')
+    model.load_state_dict(new_state_dict)
     print("inference")
     vi_masks, bo_masks, a_masks, invisible_masks = model(x)
     print(vi_masks.shape)

@@ -4,7 +4,7 @@ cocoapi/
 *.JPEG
 *.png
 runs/
-checkpoints*/
+checkpoint*/
 testing.py
 # don't save slurm log files
 *.err

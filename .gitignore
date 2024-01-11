@@ -2,7 +2,7 @@ mmdetection/
 mmdetection3d/
 cocoapi/
 *.JPEG
-*.png
+# *.png
 runs/
 checkpoint*/
 testing.py

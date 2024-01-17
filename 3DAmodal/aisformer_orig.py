@@ -179,6 +179,7 @@ class AISFormer(nn.Module):
 
 def test():
     x = torch.randn(2, 256, 16, 16)
+    x = torch.loa
     cfg = OmegaConf.load("3DAmodal/configs/config.yaml")
     devices = ['cpu', 'cpu']
     model = AISFormer(devices, cfg)
@@ -198,6 +199,7 @@ def test():
     print(bo_masks.shape)
     print(a_masks.shape)
     print(invisible_masks.shape)
+
 
 if __name__ == "__main__":
     test()

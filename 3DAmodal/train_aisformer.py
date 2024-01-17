@@ -114,19 +114,18 @@ class Trainer():
         # load checkpoint if specified
         if self.cfg.START_FROM_CKPT:
             state_dict = torch.load(self.cfg.CKPT_PATH)
-            new_state_dict = OrderedDict()
-            for key in state_dict['model'].keys():
-                if "mask_head_model" in key:
-                    if "predictor" not in key:
+            if 'checkpoint_orig' in self.cfg.CKPT_PATH:
+                new_state_dict = OrderedDict()
+                for key in state_dict['model'].keys():
+                    if "mask_head_model" in key:
                         new_state_dict[key.replace("roi_heads.mask_head.mask_head_model.", "")] = state_dict['model'][key]
-            self.model.load_state_dict(new_state_dict)
-
-            # state_dict = torch.load(self.cfg.CKPT_PATH)
-            # for key in list(state_dict.keys()):
-            #     if "module" in key:
-            #         state_dict[key.replace("module.", "")] = state_dict.pop(key)
-            # self.model.load_state_dict(state_dict)
-            # print("Loaded checkpoint from {}".format(self.cfg.CKPT_PATH))
+                self.model.load_state_dict(new_state_dict, strict=False)
+            else:
+                for key in list(state_dict.keys()):
+                    if "module" in key:
+                        state_dict[key.replace("module.", "")] = state_dict.pop(key)
+                self.model.load_state_dict(state_dict)
+            print("Loaded checkpoint from {}".format(self.cfg.CKPT_PATH))
 
         if multi_gpu:
             if cfg.DISTRIBUTED.MODEL:
@@ -775,9 +774,12 @@ class Trainer():
                                                                    running_loss_i/len(self.dataloader),
                                                                    running_loss/len(self.dataloader)))
 
-            if self.devices[0] == 0: # only save model on gpu 0
+            if self.devices[0] == 0 or self.devices[0] == 'cpu': # only save model on gpu 0
                 if epoch_idx % self.save_interval == 0 or epoch_idx == self.epochs-1:
-                    torch.save(self.model.state_dict(), "{}/aisformer_{}.pth".format(CKP_FOLDER, epoch_idx))
+                    if self.cfg.DISTRIBUTED.MODEL:
+                        torch.save(self.model.module.state_dict(), "{}/aisformer_{}.pth".format(CKP_FOLDER, epoch_idx))
+                    else:
+                        torch.save(self.model.state_dict(), "{}/aisformer_{}.pth".format(CKP_FOLDER, epoch_idx))
 
         
     def test_kins(self):

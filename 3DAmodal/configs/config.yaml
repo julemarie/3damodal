@@ -3,7 +3,6 @@ MODEL_NAME: 3DAmodalFormer
 MODEL_CLASS: model:3DAmodalFormer
 MODEL:
     WEIGHTS: "../checkpoints/"
-    BACKBONE: "fasterrcnn_resnet50_fpn" #hardcoded for now
     PARAMS:
         INPUT_H: 250 # 540
         INPUT_W: 828 # 960
@@ -29,10 +28,9 @@ EPOCHS: 2000
 CHECK_VAL_EVERY_N_EPOCH: 1
 RANDOM_SEED: 42
 DATASET: 
-    NAME: datasets.KINS_dataset:KINS # datasets.asd_dataset:AmodalSynthDriveDataset
-    TRAIN: /home/jule-magnus/dd2414/Data/ #/local_storage/users/tibbe/datasets/KINS/ # /local_storage/users/tibbe/datasets/AmodalSynthDrive/train/ 
-    # /Midgard/Data/tibbe/datasets/AmodalSynthDrive/train
-    TEST: /home/jule-magnus/dd2414/Data/ #/local_storage/users/tibbe/datasets/AmodalSynthDrive/test/
+    NAME: datasets.KINS_dataset:KINS 
+    TRAIN: /home/jule-magnus/dd2414/Data/ 
+    TEST: /home/jule-magnus/dd2414/Data/ 
 BATCH_SIZE: 1
 OUTPUT_DIR:
     TRAINING: "./outputs/training/"
@@ -41,9 +39,9 @@ DEVICE: 'cuda'
 DISTRIBUTED:
     MODEL: False
     DATA: True
-SAVE_INTERVAL: 20
+SAVE_INTERVAL: 5
 START_FROM_CKPT: True
-CKPT_PATH: /home/jule-magnus/dd2414/merge_repo/3damodal/3DAmodal/checkpoints_orig/aisformer_r50_kins.pth #"/Midgard/home/tibbe/3damodal/3DAmodal/checkpoint_orig/aisformer_r50_kins.pth"
-SAVE_CKPT_FOLDER: /home/jule-magnus/dd2414/merge_repo/3damodal/3DAmodal/checkpoints #"/Midgard/home/tibbe/3damodal/3DAmodal/checkpoints"
-RUNS_FOLDER: /home/jule-magnus/dd2414/merge_repo/3damodal/3DAmodal/runs #"/Midgard/home/tibbe/3damodal/3DAmodal/runs"
+CKPT_PATH: /home/jule-magnus/dd2414/merge_repo/3damodal/3DAmodal/checkpoints_orig/aisformer_r50_kins.pth 
+SAVE_CKPT_FOLDER: /home/jule-magnus/dd2414/merge_repo/3damodal/3DAmodal/checkpoints 
+RUNS_FOLDER: /home/jule-magnus/dd2414/merge_repo/3damodal/3DAmodal/runs_pp 
 LOG_LEVEL: INFO

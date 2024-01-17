@@ -53,7 +53,7 @@ def log(s):
         print(s)
 
 # logging
-#from torch.utils.tensorboard import SummaryWriter
+from torch.utils.tensorboard import SummaryWriter
 import datetime
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "caching_allocator"
@@ -83,9 +83,9 @@ def ddp_setup(rank, world_size):
 
 
 class Trainer():
-    #def __init__(self, cfg, device, multi_gpu=False, writer=SummaryWriter(), train=True):
-    def __init__(self, cfg, device, multi_gpu=False, train=True):
-        #self.writer = writer
+    def __init__(self, cfg, device, multi_gpu=False, writer=SummaryWriter(), train=True):
+    #def __init__(self, cfg, device, multi_gpu=False, train=True):
+        self.writer = writer
         if device == -1:
             device = torch.device("cpu")
         self.cfg = cfg
@@ -515,11 +515,11 @@ class Trainer():
                 running_loss_v += loss_v.item()
                 running_loss_i += loss_i.item()
 
-                #self.writer.add_scalar("Training loss [batch]", total_loss, (epoch_idx)*len(self.dataloader)+step)
+                self.writer.add_scalar("Training loss [batch]", total_loss, (epoch_idx)*len(self.dataloader)+step)
                 loss_dict = {"Loss amodal [batch]": loss_a,
                              "Loss visible [batch]": loss_v,
                              "Loss invisible [batch]": loss_i}
-                #self.writer.add_scalars("Individual losses [batch]", loss_dict, (epoch_idx)*len(self.dataloader)+step)
+                self.writer.add_scalars("Individual losses [batch]", loss_dict, (epoch_idx)*len(self.dataloader)+step)
 
                 step += 1
 
@@ -541,13 +541,13 @@ class Trainer():
             masks = torch.cat((m_v[0][None,None], m_a[0][None,None], m_i[0][None,None], m_o[0][None,None]), dim=0)
 
             all_masks = torch.cat((gt_masks, masks), dim=2)
-            #self.writer.add_images("masks [v, a, i, o(no gt)]", all_masks, (epoch_idx+1)*len(self.dataloader), dataformats="NCHW")
+            self.writer.add_images("masks [v, a, i, o(no gt)]", all_masks, (epoch_idx+1)*len(self.dataloader), dataformats="NCHW")
 
-            #self.writer.add_scalar("Training loss [epoch]", running_loss/len(self.dataloader), (epoch_idx+1))
+            self.writer.add_scalar("Training loss [epoch]", running_loss/len(self.dataloader), (epoch_idx+1))
             loss_dict = {"Loss amodal [epoch]": running_loss_a/len(self.dataloader),
                             "Loss visible [epoch]": running_loss_v/len(self.dataloader),
                             "Loss invisible [epoch]": running_loss_i/len(self.dataloader)}
-            #self.writer.add_scalars("Individual losses [epoch]", loss_dict, (epoch_idx+1))
+            self.writer.add_scalars("Individual losses [epoch]", loss_dict, (epoch_idx+1))
 
             self.scheduler.step()
 
@@ -659,19 +659,19 @@ class Trainer():
 def main(rank: int, world_size: int, cfg: OmegaConf):
     if world_size > 1:
         ddp_setup(rank, world_size)
-        #writer = SummaryWriter("{}/{}".format(RUNS_FOLDER, datetime.datetime.now().strftime("%Y%m%d-%H%M%S")))
+        writer = SummaryWriter("{}/{}".format(RUNS_FOLDER, datetime.datetime.now().strftime("%Y%m%d-%H%M%S")))
         print("Init the Trainer...")
-        trainer = Trainer(cfg=cfg, device=rank, multi_gpu=True)
-        #trainer = Trainer(cfg=cfg, device=rank, multi_gpu=True, writer=writer)
+        #trainer = Trainer(cfg=cfg, device=rank, multi_gpu=True)
+        trainer = Trainer(cfg=cfg, device=rank, multi_gpu=True, writer=writer)
     else:
-        #writer = SummaryWriter("{}/{}".format(RUNS_FOLDER, datetime.datetime.now().strftime("%Y%m%d-%H%M%S")))
+        writer = SummaryWriter("{}/{}".format(RUNS_FOLDER, datetime.datetime.now().strftime("%Y%m%d-%H%M%S")))
         print("Init the Trainer...")
-        trainer = Trainer(cfg=cfg, device=rank, multi_gpu=False)
-        #trainer = Trainer(cfg=cfg, device=rank, multi_gpu=False, writer=writer)
+        #trainer = Trainer(cfg=cfg, device=rank, multi_gpu=False)
+        trainer = Trainer(cfg=cfg, device=rank, multi_gpu=False, writer=writer)
         
     trainer.train()
 
-    #writer.close()
+    writer.close()
 
     if world_size > 1:
         destroy_process_group()

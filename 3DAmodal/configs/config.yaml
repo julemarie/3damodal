@@ -14,6 +14,7 @@ MODEL:
         NUM_HEADS: 1
         NUM_LAYERS: 1
         NUM_OUTPUT_MASKS: 4
+    PATH: /home/jule-magnus/dd2414/merge_repo/3damodal/3DAmodal/model_checkpoints/pretrained_pointpillars_epoch_160.pth
 # Training params
 OPTIMIZER: SGD # Hard coded rn
 OPTIMIZER_MOMENTUM:
@@ -29,9 +30,9 @@ CHECK_VAL_EVERY_N_EPOCH: 1
 RANDOM_SEED: 42
 DATASET: 
     NAME: datasets.KINS_dataset:KINS # datasets.asd_dataset:AmodalSynthDriveDataset
-    TRAIN: /local_storage/users/tibbe/datasets/KINS/ # /local_storage/users/tibbe/datasets/AmodalSynthDrive/train/ 
+    TRAIN: /home/jule-magnus/dd2414/Data/ #/local_storage/users/tibbe/datasets/KINS/ # /local_storage/users/tibbe/datasets/AmodalSynthDrive/train/ 
     # /Midgard/Data/tibbe/datasets/AmodalSynthDrive/train
-    TEST: /local_storage/users/tibbe/datasets/AmodalSynthDrive/test/
+    TEST: /home/jule-magnus/dd2414/Data/ #/local_storage/users/tibbe/datasets/AmodalSynthDrive/test/
 BATCH_SIZE: 1
 OUTPUT_DIR:
     TRAINING: "./outputs/training/"
@@ -42,7 +43,7 @@ DISTRIBUTED:
     DATA: True
 SAVE_INTERVAL: 20
 START_FROM_CKPT: True
-CKPT_PATH: "/Midgard/home/tibbe/3damodal/3DAmodal/checkpoint_orig/aisformer_r50_kins.pth"
-SAVE_CKPT_FOLDER: "/Midgard/home/tibbe/3damodal/3DAmodal/checkpoints"
-RUNS_FOLDER: "/Midgard/home/tibbe/3damodal/3DAmodal/runs"
+CKPT_PATH: /home/jule-magnus/dd2414/merge_repo/3damodal/3DAmodal/checkpoints_orig/aisformer_r50_kins.pth #"/Midgard/home/tibbe/3damodal/3DAmodal/checkpoint_orig/aisformer_r50_kins.pth"
+SAVE_CKPT_FOLDER: /home/jule-magnus/dd2414/merge_repo/3damodal/3DAmodal/checkpoints #"/Midgard/home/tibbe/3damodal/3DAmodal/checkpoints"
+RUNS_FOLDER: /home/jule-magnus/dd2414/merge_repo/3damodal/3DAmodal/runs #"/Midgard/home/tibbe/3damodal/3DAmodal/runs"
 LOG_LEVEL: INFO

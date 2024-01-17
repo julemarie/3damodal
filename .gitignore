@@ -1,5 +1,6 @@
 mmdetection/
 mmdetection3d/
+detectron2/
 cocoapi/
 *.JPEG
 *.png

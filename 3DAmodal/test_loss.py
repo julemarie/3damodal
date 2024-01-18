@@ -3,12 +3,16 @@ import torch.nn as nn
 from torchvision.ops import feature_pyramid_network, FeaturePyramidNetwork, MultiScaleRoIAlign
 from torchvision.models import resnet50
 from torchvision.models.detection import generalized_rcnn, fasterrcnn_resnet50_fpn, rpn, anchor_utils
+from torchvision.models.detection.backbone_utils import LastLevelMaxPool
 from omegaconf import OmegaConf
 import sys
 sys.path.append('/Midgard/home/tibbe/3damodal/3DAmodal/datasets')
 from dataloader import get_dataloader
 from utils import get_obj_from_str
-import detectron2
+from aisformer_orig import AISFormer as AISFormer_orig
+
+from detectron2.modeling import FPN
+
 
 
 
@@ -54,6 +58,28 @@ def dice_loss(pred, target):
     loss = 1 - (2*intersection + 1e-6) / (union + 1e-6)
     return loss
 
+def dice_bce_loss(pred, target, smooth=1):
+    """
+        Compute the loss between a prediction mask and a ground truth mask.
+
+        Inputs:
+            pred: Tensor [H, W]
+            target: Tensor [H, W]
+    """
+
+    # flatten label and prediction tensors
+    pred = pred.view(-1)
+    target = target.view(-1)
+    
+    # compute dice loss
+    intersection = (pred * target).sum()
+    dice_loss = 1 - (2.*intersection + smooth) / (pred.sum() + target.sum() + smooth)
+    BCE = torch.nn.functional.binary_cross_entropy(pred, target, reduction='mean')
+    Dice_BCE = BCE + dice_loss
+
+    
+    return BCE, dice_loss, Dice_BCE
+
 
 
 
@@ -65,27 +91,39 @@ def test():
     target_bottom = torch.cat((target0, target0, target0, target0), dim=1)
     target = torch.cat((target_top, target_bottom), dim=0)
 
-    pred_top = torch.cat((target0, target0, target1, target0), dim=1)
-    pred_bottom = torch.cat((target0, target0, target1, target1), dim=1)
+    target2 = target1.clone()
+    target2[:, 0:50] = 0
+
+    pred_top = torch.cat((target0, target0, target2, target1), dim=1)
+    pred_bottom = torch.cat((target0, target0, target0, target0), dim=1)
     pred = torch.cat((pred_top, pred_bottom), dim=0)
 
-    pred = torch.rand((256, 256))
+    # pred = torch.rand((256, 256))
+    # pred = target
     
 
     # test binary_CE
     loss = binary_CE(pred, target)
-    print(loss)
+    print("BCE loss: {}".format(loss))
 
     # test weighted_binary_CE
     # pred = 255*torch.zeros((256, 256))
-    target = 255*target
-    pred = target
+    # target = 255*target
+    # pred = target
     loss = weighted_binary_CE(pred, target)
-    print(loss)
+    print("Weighted BCE loss: {}".format(loss))
 
     # test dice_loss
     loss = dice_loss(pred, target)
-    print(loss)
+    print("Dice loss: {}".format(loss))
+
+    # test dice_bce_loss
+    bce, dice, both = dice_bce_loss(pred, target)
+    print("BCE2 loss: {}".format(bce))
+    print("Dice2 loss: {}".format(dice))
+    print("Dice BCE loss: {}".format(both))
+
+    return 0
 
 from typing import List, Tuple
 
@@ -141,12 +179,25 @@ def test_resnet():
     FRCNN.roi_heads.register_forward_hook(get_activation('roi_heads'))
     out = FRCNN(img)
     resnet.eval()
+
+    res1 = nn.Sequential(*list(resnet.children())[:5])
+    res2 = nn.Sequential(*list(resnet.children())[5:6])
+    res3 = nn.Sequential(*list(resnet.children())[6:7])
+    res4 = nn.Sequential(*list(resnet.children())[7:8])
+
+    features = {}
+
+    features['0'] = res1(img)
+    features['1'] = res2(features['0'])
+    features['2'] = res3(features['1'])
+    features['3'] = res4(features['2'])
+
     
     state_dict = torch.load("/Midgard/home/tibbe/3damodal/3DAmodal/checkpoint_orig/aisformer_r50_kins.pth", map_location=torch.device('cpu'))
     resnet_dict = resnet.state_dict()
     frcnn_state_dict = FRCNN.state_dict()
     # fpn = feature_pyramid_network([resnet.layer1, resnet.layer2, resnet.layer3, resnet.layer4], 256, 256)
-    fpn = FeaturePyramidNetwork([256, 512, 1024, 2048], 256)
+    fpn = FeaturePyramidNetwork([256, 512, 1024, 2048], 256, extra_blocks=LastLevelMaxPool())
     anchor_gen = anchor_utils.AnchorGenerator(sizes=((256, 256, 256, 256)), aspect_ratios=((4, 8, 16, 32)))
     rpn_head = rpn.RPNHead(256, 4)
     region_prop = rpn.RegionProposalNetwork(anchor_generator=anchor_gen, head=rpn_head,
@@ -162,6 +213,7 @@ def test_resnet():
     rpn_FRCNN.anchor_generator.cell_anchors = rpn_FRCNN.anchor_generator.cell_anchors[:-1]
     roi_head = FRCNN.roi_heads
     multi_roi = MultiScaleRoIAlign(['0', '1', '2', '3'], 14, 2)
+    aisformer = AISFormer_orig(['cpu', 'cpu'], cfg)
 
 
     # resnet.load_state_dict(state_dict, strict=False)
@@ -195,6 +247,7 @@ def test_resnet():
     resnet.layer2.register_forward_hook(get_activation('layer2'))
     resnet.layer3.register_forward_hook(get_activation('layer3'))
     resnet.layer4.register_forward_hook(get_activation('layer4'))
+    
     out_res = resnet(img)
     input_feat = {'0': activation['layer1'], '1': activation['layer2'], '2': activation['layer3'], '3': activation['layer4']}
     out_fpn = fpn(input_feat)
@@ -209,7 +262,8 @@ def test_resnet():
     out_mask_roi = multi_roi(out_fpn, [bbs], img_lst.image_sizes)
 
     # AISformer
-    
+    out_aisformer = aisformer(out_mask_roi)
+
 
     # draw bbs on image
     

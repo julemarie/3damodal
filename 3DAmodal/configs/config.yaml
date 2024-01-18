@@ -3,12 +3,17 @@ MODEL_NAME: 3DAmodalFormer
 MODEL_CLASS: model:3DAmodalFormer
 MODEL:
     WEIGHTS: "../checkpoints/"
-    BACKBONE: "fasterrcnn_resnet50_fpn" #hardcoded for now
+    BACKBONE:
+        BB_THRESH: 0.85
+        FPN:
+            IN_FEATURES: ['res1', 'res2', 'res3', 'res4']
+            OUT_CHANNELS: 256
+        FEATURE_DIMS: [256, 512, 1024, 2048]
     PARAMS:
-        INPUT_H: 250 # 540
-        INPUT_W: 828 # 960
+        INPUT_H: 256 # 540
+        INPUT_W: 832 # 960
         IN_CHANS : 3
-        ROI_OUT_SIZE: 16
+        ROI_OUT_SIZE: 14
         Q_DIM: 3
         EMBED_DIM : 256
         NUM_HEADS: 1

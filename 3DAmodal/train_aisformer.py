@@ -1,5 +1,6 @@
+import argparse
 from aisformer import AISFormer
-from aisformer_orig import AISFormer as AISFormer_orig
+from aisformer_w_backbone import AISFormer_orig, Backbone
 # from datasets.asd_dataset import AmodalSynthDriveDataset
 # from datasets.KINS_dataset import KINS
 import sys
@@ -29,6 +30,8 @@ import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 import os
+import logging
+import traceback
 from collections import OrderedDict
 # import logging
 
@@ -39,10 +42,7 @@ from collections import OrderedDict
 #     )
 # logger = logging.getLogger(__name__)
 
-cfg_path="/Midgard/home/tibbe/3damodal/3DAmodal/configs/config.yaml"
-cfg = OmegaConf.load(cfg_path)
-
-LOG_LEVEL = cfg.LOG_LEVEL
+LOG_LEVEL = ""
 
 def log(s):
     if LOG_LEVEL == "DEBUG":
@@ -54,13 +54,8 @@ import datetime
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "caching_allocator"
 
-RUNS_FOLDER = cfg.RUNS_FOLDER
-CKP_FOLDER = cfg.SAVE_CKPT_FOLDER
-
-if not os.path.exists(RUNS_FOLDER):
-    os.mkdir(RUNS_FOLDER)
-if not os.path.exists(CKP_FOLDER):
-    os.mkdir(CKP_FOLDER)
+RUNS_FOLDER = ""
+CKP_FOLDER = ""
 
 
 def ddp_setup(rank, world_size):
@@ -84,21 +79,15 @@ class Trainer():
         self.writer = writer
         if device == -1:
             device = torch.device("cpu")
+        else:
+            device = torch.device("cuda:{}".format(device))
         self.cfg = cfg
         self.in_shape = tuple((self.cfg.MODEL.PARAMS.INPUT_H, self.cfg.MODEL.PARAMS.INPUT_W))
 
         self.save_interval = self.cfg.SAVE_INTERVAL
 
-        self.backbone = fasterrcnn_resnet50_fpn(pretrained=True)
-        # params = self.backbone.state_dict()
-        # for name, param in self.backbone.state_dict().items():
-        #     print(name)
+        self.backbone = Backbone(self.cfg)
         self.backbone.eval()
-        resnet = resnet50(pretrained=True)
-        rgbd_conv = nn.Conv2d(4, 64, kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False)
-        self.feat_encoder = nn.ModuleList([resnet.conv1, resnet.bn1, resnet.relu, resnet.maxpool, resnet.layer1])
-        # ROIAlign takes images and ROIs as input and outputs a tensor of size [K, in_chans, (OUT_SIZE)] where K = #bboxes
-        # self.roi_align = RoIAlign(output_size=(self.cfg.MODEL.PARAMS.ROI_OUT_SIZE, self.cfg.MODEL.PARAMS.ROI_OUT_SIZE), spatial_scale=3, sampling_ratio=2,aligned=True)
         
         # init model and move it to device
         log("BEFORE MODEL: {}".format(torch.cuda.memory_allocated(device)/1.074e+9))
@@ -113,7 +102,7 @@ class Trainer():
         
         # load checkpoint if specified
         if self.cfg.START_FROM_CKPT:
-            state_dict = torch.load(self.cfg.CKPT_PATH)
+            state_dict = torch.load(self.cfg.CKPT_PATH, map_location=self.devices[0])
             if 'checkpoint_orig' in self.cfg.CKPT_PATH:
                 new_state_dict = OrderedDict()
                 for key in state_dict['model'].keys():
@@ -159,7 +148,7 @@ class Trainer():
         self.epochs = self.cfg.EPOCHS
 
         if isinstance(dataset, datasets.KINS_dataset.KINS):
-            self.mask_tf = transforms.Resize((250,828))
+            self.mask_tf = transforms.Resize(self.in_shape)
 
         # self.viewstr2int = {"front_full": 0,
         #                     "back_full": 1,
@@ -211,7 +200,7 @@ class Trainer():
         return resized_mask
     
 
-    def compute_loss(self, pred_mask, gt_mask):
+    def compute_loss(self, pred_mask, gt_mask, smooth=1):
         """
             Compute the loss between a prediction mask and a ground truth mask.
 
@@ -219,8 +208,20 @@ class Trainer():
                 pred_mask: Tensor [H, W]
                 gt_mask: Tensor [H, W]
         """
+        # flatten label and prediction tensors
+        pred_mask = pred_mask.view(-1)
+        gt_mask = gt_mask.view(-1)
+        
+        # compute dice loss
+        intersection = (pred_mask * gt_mask).sum()
+        dice_loss = 1 - (2.*intersection + smooth) / (pred_mask.sum() + gt_mask.sum() + smooth)
+        # compute binary cross entropy loss
+        BCE = torch.nn.functional.binary_cross_entropy(pred_mask, gt_mask, reduction='mean')
+        # compute dice + BCE loss
+        loss = BCE + dice_loss
+
         # compute binnary cross entropy loss
-        loss = torch.nn.functional.binary_cross_entropy(pred_mask, gt_mask)
+        # loss = torch.nn.functional.binary_cross_entropy(pred_mask, gt_mask)
         # define weight as avg number of black pixels / avg number of all pixels
         # all_pixels = gt_mask.shape[0]*gt_mask.shape[1]
         # black_pixels = all_pixels - gt_mask.sum()
@@ -608,7 +609,8 @@ class Trainer():
 
                 # move gt masks to gpu
                 # gt_bbs: [xmin, ymin, diffx, diffy]
-                gt_bbs = [((b*2)//3).to('cpu') for b in gt_bbs] # resize bbs to match resized image
+                gt_bbs = [torch.div(b*2, 3, rounding_mode='floor').to('cpu') for b in gt_bbs] # resize bbs to match resized image
+                # gt_bbs = [((b*2)//3).to('cpu') for b in gt_bbs] # resize bbs to match resized image
                 gt_inmodal_masks = [m.to(out_dev) for m in gt_inmodal_masks]
                 gt_amodal_masks = [m.to(out_dev) for m in gt_amodal_masks]
                 gt_invis_masks = [m.to(out_dev) for m in gt_invis_masks]
@@ -620,23 +622,9 @@ class Trainer():
                 # self.optimizer.zero_grad()
                 
                 # 2) pass images through model (output will be the four masks)
-                thresh = 0.9
-                x = self.backbone(img_batch)
-                roi_list = []
-                for i, ann in enumerate(x):
-                    boxes = ann["boxes"][torch.where(ann["scores"] > thresh)]
-                    id = i*torch.ones((boxes.shape[0]), dtype=torch.int, device='cpu').unsqueeze(-1)
-                    roi_list.append(torch.cat((id, boxes), dim=1))
-
-                if roi_list:
-                    # pred bbs: [xmin, ymin, xmax, ymax]
-                    rois = torch.cat(roi_list, dim=0) # [K, 5] K: #bboxes, 5: first for img id and last four for corners
-                else:
-                    continue
-
-                log("AFTER ROI: {}".format(torch.cuda.memory_allocated(self.devices[0])/1.074e+9))
-                torch.cuda.empty_cache()
-
+                features, rois = self.backbone(img_batch)
+                rois = torch.cat((torch.zeros((rois.shape[0], 1), dtype=torch.float), rois), dim=1)
+                rois = rois.to(torch.int).to('cpu')
                 # # draw bounding boxes on image
                 # x1, y1, x2, y2 = rois[0, 1], rois[0, 2], rois[0, 3], rois[0, 4]
                 # pil_img = Image.fromarray(img_batch[0].permute(1,2,0).numpy(), mode="RGB")
@@ -651,13 +639,8 @@ class Trainer():
                 # ImageDraw.Draw(pil_img).rectangle([x1, y1, x1+diffx, y1+diffy], outline=255, fill=100)
                 # img_w_bb = torch.tensor(np.array(pil_img), dtype=torch.float).permute(2,0,1).unsqueeze(0)
                 # save_image(img_w_bb, "test_bbs.png")
-                
-                feats = img_batch
-                for l in self.feat_encoder:
-                    feats = l(feats)
 
-                f_roi = roi_align(feats, rois, output_size=(self.cfg.MODEL.PARAMS.ROI_OUT_SIZE, self.cfg.MODEL.PARAMS.ROI_OUT_SIZE), spatial_scale=0.25, sampling_ratio=-1,aligned=True) # [K, C, H_r, W_r]
-                if f_roi.shape[0] == 0:
+                if features.shape[0] == 0:
                     continue
                 # normalize
                 # mean = [0.485, 0.456, 0.406]
@@ -666,7 +649,7 @@ class Trainer():
                 # save_image(f_roi[0], "img_1.png")
                 # masks = self.model(f_roi) # [K, 4, 56, 56], [K, 5]
                 log("BEFORE FW: {}".format(torch.cuda.memory_allocated(self.devices[0])/1.074e+9))
-                m_v, m_o, m_a, m_i = self.model(f_roi) # [K, 1, 56, 56], [K, 1, 56, 56], [K, 1, 56, 56], [K, 1, 56, 56]
+                m_v, m_o, m_a, m_i = self.model(features) # [K, 1, 56, 56], [K, 1, 56, 56], [K, 1, 56, 56], [K, 1, 56, 56]
                 log("AFTER FW: {}".format(torch.cuda.memory_allocated(self.devices[0])/1.074e+9))
                 m_v = m_v.squeeze(1)
                 m_o = m_o.squeeze(1)
@@ -683,7 +666,7 @@ class Trainer():
                 #     continue
                 
                 # torch.cuda.empty_cache()
-                rois = rois.to(torch.int).to('cpu')
+                
                 # K, num_masks, H_m, W_m = masks.shape
                 # m_o = masks[:, 0] # occluder mask (no gt in KINS)
                 # m_v = masks[:, 1] # visible mask (inmodal)
@@ -726,11 +709,12 @@ class Trainer():
                 running_loss_v += loss_v.item()
                 running_loss_i += loss_i.item()
 
-                self.writer.add_scalar("Training loss [batch]", total_loss, (epoch_idx)*len(self.dataloader)+step)
-                loss_dict = {"Loss amodal [batch]": loss_a,
-                             "Loss visible [batch]": loss_v,
-                             "Loss invisible [batch]": loss_i}
-                self.writer.add_scalars("Individual losses [batch]", loss_dict, (epoch_idx)*len(self.dataloader)+step)
+                if self.writer is not None:
+                    self.writer.add_scalar("Training loss [batch]", total_loss, (epoch_idx)*len(self.dataloader)+step)
+                    loss_dict = {"Loss amodal [batch]": loss_a,
+                                "Loss visible [batch]": loss_v,
+                                "Loss invisible [batch]": loss_i}
+                    self.writer.add_scalars("Individual losses [batch]", loss_dict, (epoch_idx)*len(self.dataloader)+step)
 
                 step += 1
 
@@ -740,32 +724,33 @@ class Trainer():
             # save_image(m_i[0], "test_i_{}.png".format(epoch_idx))
             # save_image(m_o[0], "test_o_{}.png".format(epoch_idx))
             # print(gt_invis_masks[0][assigned_masks_i[0]][None,None].shape)
-            pseudo_mask_o = torch.zeros_like(m_o[0][None])
-            if assigned_masks_a[0] != 'fp':
-                gt_mask_a = self.crop_and_resize_mask(gt_amodal_masks[0][assigned_masks_a[0]].squeeze(0), rois[0])[None]
-            else:
-                gt_mask_a = pseudo_mask_o
-            if assigned_masks_v[0] != 'fp':
-                gt_mask_v = self.crop_and_resize_mask(gt_inmodal_masks[0][assigned_masks_v[0]].squeeze(0), rois[0])[None]
-            else:
-                gt_mask_v = pseudo_mask_o
-            if assigned_masks_i[0] != 'fp':
-                gt_mask_i = self.crop_and_resize_mask(gt_invis_masks[0][assigned_masks_i[0]].squeeze(0), rois[0])[None]
-            else:
-                gt_mask_i = pseudo_mask_o
-            gt_masks = torch.stack((gt_mask_v, gt_mask_a, gt_mask_i, pseudo_mask_o), dim=0)
-            # gt_masks = torch.cat((gt_inmodal_masks[0][assigned_masks_v[0]][None,None], gt_amodal_masks[0][assigned_masks_a[0]][None,None], gt_invis_masks[0][assigned_masks_i[0]][None,None], torch.zeros_like(gt_invis_masks[0][assigned_masks_i[0]][None,None])), dim=0)
-            # print(gt_masks.shape)
-            masks = torch.cat((m_v[0][None,None], m_a[0][None,None], m_i[0][None,None], m_o[0][None,None]), dim=0)
+            if self.writer is not None:
+                pseudo_mask_o = torch.zeros_like(m_o[0][None])
+                if assigned_masks_a[0] != 'fp':
+                    gt_mask_a = self.crop_and_resize_mask(gt_amodal_masks[0][assigned_masks_a[0]].squeeze(0), rois[0])[None]
+                else:
+                    gt_mask_a = pseudo_mask_o
+                if assigned_masks_v[0] != 'fp':
+                    gt_mask_v = self.crop_and_resize_mask(gt_inmodal_masks[0][assigned_masks_v[0]].squeeze(0), rois[0])[None]
+                else:
+                    gt_mask_v = pseudo_mask_o
+                if assigned_masks_i[0] != 'fp':
+                    gt_mask_i = self.crop_and_resize_mask(gt_invis_masks[0][assigned_masks_i[0]].squeeze(0), rois[0])[None]
+                else:
+                    gt_mask_i = pseudo_mask_o
+                gt_masks = torch.stack((gt_mask_v, gt_mask_a, gt_mask_i, pseudo_mask_o), dim=0)
+                # gt_masks = torch.cat((gt_inmodal_masks[0][assigned_masks_v[0]][None,None], gt_amodal_masks[0][assigned_masks_a[0]][None,None], gt_invis_masks[0][assigned_masks_i[0]][None,None], torch.zeros_like(gt_invis_masks[0][assigned_masks_i[0]][None,None])), dim=0)
+                # print(gt_masks.shape)
+                masks = torch.cat((m_v[0][None,None], m_a[0][None,None], m_i[0][None,None], m_o[0][None,None]), dim=0)
 
-            all_masks = torch.cat((gt_masks, masks), dim=2)
-            self.writer.add_images("masks [v, a, i, o(no gt)]", all_masks, (epoch_idx+1)*len(self.dataloader), dataformats="NCHW")
+                all_masks = torch.cat((gt_masks, masks), dim=2)
+                self.writer.add_images("masks [v, a, i, o(no gt)]", all_masks, (epoch_idx+1)*len(self.dataloader), dataformats="NCHW")
 
-            self.writer.add_scalar("Training loss [epoch]", running_loss/len(self.dataloader), (epoch_idx+1))
-            loss_dict = {"Loss amodal [epoch]": running_loss_a/len(self.dataloader),
-                            "Loss visible [epoch]": running_loss_v/len(self.dataloader),
-                            "Loss invisible [epoch]": running_loss_i/len(self.dataloader)}
-            self.writer.add_scalars("Individual losses [epoch]", loss_dict, (epoch_idx+1))
+                self.writer.add_scalar("Training loss [epoch]", running_loss/len(self.dataloader), (epoch_idx+1))
+                loss_dict = {"Loss amodal [epoch]": running_loss_a/len(self.dataloader),
+                                "Loss visible [epoch]": running_loss_v/len(self.dataloader),
+                                "Loss invisible [epoch]": running_loss_i/len(self.dataloader)}
+                self.writer.add_scalars("Individual losses [epoch]", loss_dict, (epoch_idx+1))
 
             self.scheduler.step()
 
@@ -878,33 +863,56 @@ class Trainer():
 
         
 def main(rank: int, world_size: int, cfg: OmegaConf):
-    if world_size > 1:
-        ddp_setup(rank, world_size)
-        writer = SummaryWriter("{}/{}".format(RUNS_FOLDER, datetime.datetime.now().strftime("%Y%m%d-%H%M%S")))
-        print("Init the Trainer...")
-        trainer = Trainer(cfg=cfg, device=rank, multi_gpu=True, writer=writer)
-    else:
-        writer = SummaryWriter("{}/{}".format(RUNS_FOLDER, datetime.datetime.now().strftime("%Y%m%d-%H%M%S")))
-        print("Init the Trainer...")
-        trainer = Trainer(cfg=cfg, device=rank, multi_gpu=False, writer=writer)
-        
-    trainer.train_kins()
+    global RUNS_FOLDER, CKP_FOLDER, LOG_LEVEL
 
-    writer.close()
+    LOG_LEVEL = cfg.LOG_LEVEL
 
-    if world_size > 1:
-        destroy_process_group()
+    RUNS_FOLDER = cfg.RUNS_FOLDER
+    CKP_FOLDER = cfg.SAVE_CKPT_FOLDER
+
+    if not os.path.exists(RUNS_FOLDER):
+        os.mkdir(RUNS_FOLDER)
+    if not os.path.exists(CKP_FOLDER):
+        os.mkdir(CKP_FOLDER)
+
+    try:
+        if world_size > 1:
+            ddp_setup(rank, world_size)
+            if rank == 0:
+                writer = SummaryWriter("{}/{}".format(RUNS_FOLDER, datetime.datetime.now().strftime("%Y%m%d-%H%M%S")))
+            else:
+                writer = None
+            print("Init the Trainer...")
+            trainer = Trainer(cfg=cfg, device=rank, multi_gpu=True, writer=writer)
+        else:
+            writer = SummaryWriter("{}/{}".format(RUNS_FOLDER, datetime.datetime.now().strftime("%Y%m%d-%H%M%S")))
+            print("Init the Trainer...")
+            trainer = Trainer(cfg=cfg, device=rank, multi_gpu=False, writer=writer)
+            
+        trainer.train_kins()
+
+        writer.close()
+
+        if world_size > 1:
+            destroy_process_group()
+
+    except Exception as e:
+        logging.error(traceback.format_exc())
+        writer.close()
+        if world_size > 1:
+            destroy_process_group()
 
 
 if __name__ == "__main__":
     world_size = torch.cuda.device_count()
-    torch.cuda.empty_cache()
-    # log_level = logging.getLevelName(cfg.LOG_LEVEL)
-    # logging.basicConfig(
-    #     level=logging.INFO,
-    #     format="%(asctime)s [%(levelname)s] %(message)s",
-    #     handlers=[logging.StreamHandler()]
-    # )
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, default="/Midgard/home/tibbe/3damodal/3DAmodal/configs/config.yaml", help="Absolute path to config file")
+
+    args = parser.parse_args()
+
+    cfg_path = args.config
+    cfg = OmegaConf.load(cfg_path)
 
     if world_size == 0:
         main(-1, world_size, cfg)

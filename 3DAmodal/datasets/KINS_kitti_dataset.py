@@ -77,9 +77,3 @@ def create_amodal_to_lidar_mapping_file(mode="train", data_root="/home/jule-magn
             txtfile.write(str(val["amodal"])+ "," + str(val["lidar"]) + "\n")
 
 
-
-if __name__ == "__main__":
-    all_data = AmodalLiDAR()
-    print(all_data[150]['amodal'][1][94552]["image_id"])
-    print(all_data[150]['lidar']["image_info"]['image_idx'])
-

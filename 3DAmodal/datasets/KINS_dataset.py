@@ -60,20 +60,3 @@ class KINS(Dataset):
         anns_dict['img_width'] = img_dict['width']
         
         return img, anns_dict
-
-
-
-def testing():
-    kins_dataset = KINS()
-    print(isinstance(kins_dataset, KINS))
-    dl = DataLoader(kins_dataset, batch_size=1)
-    start = time.time()
-    for img, anns in dl:
-        print(anns.keys())
-        print("TIME",time.time()-start)
-        start = time.time()
-        break
-
-
-if __name__ == "__main__":
-    testing()

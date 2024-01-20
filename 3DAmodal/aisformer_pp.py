@@ -26,7 +26,6 @@ class AISFormerLiDAR(Module):
         self.cfg = cfg
         self.gpu_id = devices[0]
 
-
         self.aisformer = AISFormer(devices=devices, cfg=cfg)
         self.load_aisformer()
         self.aisformer.train()
@@ -46,6 +45,11 @@ class AISFormerLiDAR(Module):
     
 
 class BackbonePP(Module):
+    """
+    Backbone for AISFormer model. 
+    Use FasterRCNN predictor for standard AISFormer.
+    Use PointPillars predictor for 3D bbox prediction and optional depth mask input feature.
+    """
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
@@ -106,6 +110,15 @@ class BackbonePP(Module):
             self.fpn.layer_blocks[3].bias.copy_(state_dict['model']['backbone.fpn_output5.bias'])
 
     def create_depthmask(self, pc, result, calib):
+        """
+        Produces a depth mask in the shape of the input image by upsampling points in relevant bounding boxes.
+        Input:
+            pc:     LiDAR input points, (n, 4) (x,y,z,r)
+            result: output of PointPillars forward pass
+            calib:  corresponding callibration file for rotation matrices
+        Output:
+            depth_mask: np.array, (MODEL.PARAMS.INPUT_H, MODEL.PARAMS.INPUT_W)
+        """
         pc = pc.cpu().numpy()
         # initialize depth mask the size of the image
         depth_mask = np.zeros((self.cfg.MODEL.PARAMS.INPUT_H, self.cfg.MODEL.PARAMS.INPUT_W))
@@ -146,22 +159,37 @@ class BackbonePP(Module):
                 Z = interp(Y, X)
                 Z = np.nan_to_num(Z, nan=0.0)
             except:
-                continue
+                continue # workaround
 
             if depth_mask[y_min:y_max, x_min:x_max].shape != Z.T.shape:
-                continue # workarount for edge cases that do not align, not sure why
+                continue # workaround for edge cases that do not align, not sure why
 
             depth_mask[y_min:y_max, x_min:x_max] = Z.T
 
         return np.array(depth_mask)
     
     def forward(self, x):
+        """
+        Forward pass of AISFormer Backbone.
+        If MODEL.BACKBONE.PREDICTOR.NAME == FasterRCNN      --> predicts 2D bounding boxes from image data, standard AISFormer as in paper
+        If MODEL.BACKBONE.PREDICTOR.NAME == PointPillars    --> predicts 3D bounding boxes from LiDAR data
+            If USE_DEPTH_FEATURE                            --> uses upsampled depth mask from LiDAR data as additional input feature for AISFormer
+        
+        Input:
+            x = dict(                   see datasets.KINS_kitti_dataset.py
+                "lidar": kitti data,    see datasets.kitti.py
+                "amodal": kins data,    see datasets.KINS_dataset.py
+            )
+        Returns:
+            final_features: torch.tensor, shape (BATCH_SIZE, EMBED_DIM, ROI_OUT_SIZE, ROI_OUT_SIZE])
+            rois:           torch.tensor, shape (K, 5)
+        """
         lidar = x["lidar"]
         img, _ = x["amodal"]
         img = img.to(self.cfg.DEVICE)
 
         if self.cfg.MODEL.BACKBONE.PREDICTOR.NAME == "PointPillars":
-            # predict 3d bboxes
+            # predict 3d bboxes on LiDAR data
             x_pts = lidar["batched_pts"]
             if self.cfg.DEVICE == "cuda":
                 x_cuda = []
@@ -172,6 +200,7 @@ class BackbonePP(Module):
             
             bb_out = self.bb_predictor(x_pts)
         else:
+            # predict 2D bboxes on image data
             bb_out = self.bb_predictor(img)
 
         if self.cfg.USE_DEPTH_FEATURE:
@@ -179,7 +208,7 @@ class BackbonePP(Module):
         roi_list = []
         for i, result in enumerate(bb_out):
             if self.cfg.MODEL.BACKBONE.PREDICTOR.NAME == "PointPillars":
-                # transform bboxes to correct format
+                # transform bboxes to correct format (in 2D)
                 calib = lidar['batched_calib_info'][i]
                 result = keep_bbox_from_image_range(result,
                                                     calib['Tr_velo_to_cam'],
@@ -206,8 +235,6 @@ class BackbonePP(Module):
         if self.cfg.USE_DEPTH_FEATURE:
             depth_masks = torch.tensor(np.array(depth_masks))
 
-        
-        # pred bbs: [xmin, ymin, xmax, ymax]
         rois = torch.cat(roi_list, dim=0).float() # [K, 5] K: #bboxes, 5: first for img id and last four for corners
         if rois.shape[0] == 0:
             return None, None
@@ -231,10 +258,3 @@ class BackbonePP(Module):
         final_features = self.multi_roi_align(feature_maps, [bbs], [self.img_size])
         
         return final_features, rois
-    
-
-
-def test():
-    cfg = OmegaConf.load('3DAmodal/configs/config.yaml')
-
-    

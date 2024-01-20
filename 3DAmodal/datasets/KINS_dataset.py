@@ -23,7 +23,7 @@ class KINS(Dataset):
         if transform is None:
             self.transform = transforms.Compose([
                 transforms.ToTensor(),
-                transforms.Resize((250,828)) # oriiginal size is (375, 1242)
+                transforms.Resize((256,832)) # original size is (375, 1242)
             ])
         else:
             self.transform = transform

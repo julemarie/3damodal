@@ -1,5 +1,3 @@
-from aisformer import AISFormer
-from aisformer_orig import AISFormer as AISFormer_orig
 from aisformer_pp import AISFormerLiDAR, BackbonePP
 # from datasets.asd_dataset import AmodalSynthDriveDataset
 # from datasets.KINS_dataset import KINS
@@ -34,7 +32,8 @@ import os
 from collections import OrderedDict
 
 from pointpillars.utils import keep_bbox_from_image_range
-# import logging
+import logging
+import traceback
 
 # logging.basicConfig(
 #         level=logging.DEBUG,
@@ -93,9 +92,10 @@ class Trainer():
 
         self.save_interval = self.cfg.SAVE_INTERVAL
 
-        self.backbone = BackbonePP(cfg, "cuda")
+        self.backbone = BackbonePP(cfg)
 
         self.backbone.eval()
+        self.backbone.to(device)
         # ROIAlign takes images and ROIs as input and outputs a tensor of size [K, in_chans, (OUT_SIZE)] where K = #bboxes
         
         # init model and move it to device
@@ -107,6 +107,7 @@ class Trainer():
                 self.devices = [device, device]
         else:
             self.devices = [device, device]
+
         self.model = AISFormerLiDAR(self.devices, cfg)        
 
         if multi_gpu:
@@ -139,7 +140,7 @@ class Trainer():
 
         self.epochs = self.cfg.EPOCHS
 
-        self.mask_tf = transforms.Resize((250,828))
+        self.mask_tf = transforms.Resize(self.in_shape)
 
 
     def cosine_decay_lr(self, epoch, start_lr, end_lr, total_epochs):
@@ -395,7 +396,7 @@ class Trainer():
             else:
                 gt_mask = self.crop_and_resize_mask(gt_masks[j,0], bbs[i])
                 compare = torch.cat((pred_masks[i], gt_mask), dim=0).unsqueeze(0)
-                # save_image(compare, "test_compare_{}.png".format(type))
+                save_image(compare, "test_compare_{}.png".format(type))
                 loss += self.compute_loss(pred_masks[i], gt_mask)
         return loss
  
@@ -419,6 +420,8 @@ class Trainer():
     
     def train(self):
         self.model.train()
+        self.backbone.train()
+        self.backbone.bb_predictor.eval()
         print("Starting training on GPU:{}...".format(self.devices))
         # print(torch.cuda.current_device())
         # clear gpu memory
@@ -657,24 +660,31 @@ class Trainer():
 
         
 def main(rank: int, world_size: int, cfg: OmegaConf):
-    if world_size > 1:
-        ddp_setup(rank, world_size)
-        writer = SummaryWriter("{}/{}".format(RUNS_FOLDER, datetime.datetime.now().strftime("%Y%m%d-%H%M%S")))
-        print("Init the Trainer...")
-        #trainer = Trainer(cfg=cfg, device=rank, multi_gpu=True)
-        trainer = Trainer(cfg=cfg, device=rank, multi_gpu=True, writer=writer)
-    else:
-        writer = SummaryWriter("{}/{}".format(RUNS_FOLDER, datetime.datetime.now().strftime("%Y%m%d-%H%M%S")))
-        print("Init the Trainer...")
-        #trainer = Trainer(cfg=cfg, device=rank, multi_gpu=False)
-        trainer = Trainer(cfg=cfg, device=rank, multi_gpu=False, writer=writer)
-        
-    trainer.train()
+    try: 
+        if world_size > 1:
+            ddp_setup(rank, world_size)
+            writer = SummaryWriter("{}/{}".format(RUNS_FOLDER, datetime.datetime.now().strftime("%Y%m%d-%H%M%S")))
+            print("Init the Trainer...")
+            #trainer = Trainer(cfg=cfg, device=rank, multi_gpu=True)
+            trainer = Trainer(cfg=cfg, device=rank, multi_gpu=True, writer=writer)
+        else:
+            writer = SummaryWriter("{}/{}".format(RUNS_FOLDER, datetime.datetime.now().strftime("%Y%m%d-%H%M%S")))
+            print("Init the Trainer...")
+            #trainer = Trainer(cfg=cfg, device=rank, multi_gpu=False)
+            trainer = Trainer(cfg=cfg, device=rank, multi_gpu=False, writer=writer)
+            
+        trainer.train()
 
-    writer.close()
+        writer.close()
+        if world_size > 1:
+            destroy_process_group()
+    
+    except Exception as e:
+        logging.error(traceback.format_exc())
+        writer.close()
 
-    if world_size > 1:
-        destroy_process_group()
+        if world_size > 1:
+            destroy_process_group()
 
 
 if __name__ == "__main__":
@@ -686,6 +696,7 @@ if __name__ == "__main__":
     #     format="%(asctime)s [%(levelname)s] %(message)s",
     #     handlers=[logging.StreamHandler()]
     # )
+    #world_size = 1
 
     if world_size == 0:
         main(-1, world_size, cfg)

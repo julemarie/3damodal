@@ -8,6 +8,7 @@ from collections import OrderedDict
 
 from torchvision.ops import FeaturePyramidNetwork, MultiScaleRoIAlign
 from torchvision.models import resnet50
+from torchvision.models.detection import fasterrcnn_resnet50_fpn
 from torchvision.models.detection.backbone_utils import LastLevelMaxPool
 
 from omegaconf import OmegaConf
@@ -60,7 +61,8 @@ class BackbonePP(Module):
         resnet = resnet50(pretrained=True)
 
         self.res1 = Sequential(*list(resnet.children())[:5])
-        self.res1[0] = Conv2d(4,64, kernel_size=(7,7), stride=(2,2), padding=(3,3), bias=False)
+        if self.cfg.MODEL.BACKBONE.PREDICTOR.NAME == "PointPillars" and self.cfg.USE_DEPTH_FEATURE:
+            self.res1[0] = Conv2d(4,64, kernel_size=(7,7), stride=(2,2), padding=(3,3), bias=False)
         self.res2 = Sequential(*list(resnet.children())[5:6])
         self.res3 = Sequential(*list(resnet.children())[6:7])
         self.res4 = Sequential(*list(resnet.children())[7:8])
@@ -72,8 +74,15 @@ class BackbonePP(Module):
         self.init_fpn()
 
         # setup backbone
-        self.bb_predictor = PointPillars()
-        self.bb_predictor.load_state_dict(torch.load(cfg.MODEL.BACKBONE.PREDICTOR.WEIGHTS))
+        if self.cfg.MODEL.BACKBONE.PREDICTOR.NAME == "PointPillars":
+            self.bb_predictor = PointPillars()
+            self.bb_predictor.load_state_dict(torch.load(cfg.MODEL.BACKBONE.PREDICTOR.WEIGHTS))
+        elif self.cfg.MODEL.BACKBONE.PREDICTOR.NAME == "FasterRCNN":
+            assert self.cfg.USE_DEPTH_FEATURE == False, "Cannot use depth feature with 2D backbone FasterRCNN. In configs/config.yaml, either set USE_DEPTH_FEATURE: False or set MODEL.BACKBONE.PREDICTOR.NAME: FasterRCNN."
+            self.bb_predictor = fasterrcnn_resnet50_fpn(pretrained=True)
+        else:
+            raise Exception("Invalid backbone. In configs/config.yaml, set MODEL.BACKBONE.PREDICTOR.NAME to either PointPillars or FasterRCNN.")
+    
 
     def init_fpn(self):
         state_dict = torch.load(self.cfg.CKPT_PATH)
@@ -149,34 +158,48 @@ class BackbonePP(Module):
     def forward(self, x):
         lidar = x["lidar"]
         img, _ = x["amodal"]
-        # predict 3d bboxes
-        x_pts = lidar["batched_pts"]
-        if self.cfg.DEVICE == "cuda":
-            x_cuda = []
-            for batch in x_pts:
-                batch = torch.tensor(batch).to('cuda')
-                x_cuda.append(batch)
-            x_pts = x_cuda
         img = img.to(self.cfg.DEVICE)
-        bbox_3d = self.bb_predictor(x_pts)
+
+        if self.cfg.MODEL.BACKBONE.PREDICTOR.NAME == "PointPillars":
+            # predict 3d bboxes
+            x_pts = lidar["batched_pts"]
+            if self.cfg.DEVICE == "cuda":
+                x_cuda = []
+                for batch in x_pts:
+                    batch = torch.tensor(batch).to('cuda')
+                    x_cuda.append(batch)
+                x_pts = x_cuda
+            
+            bb_out = self.bb_predictor(x_pts)
+        else:
+            bb_out = self.bb_predictor(img)
 
         if self.cfg.USE_DEPTH_FEATURE:
             depth_masks = []
         roi_list = []
-        for i, result in enumerate(bbox_3d):
-            # transform bboxes to correct format
-            calib = lidar['batched_calib_info'][i]
-            result = keep_bbox_from_image_range(result,
-                                                calib['Tr_velo_to_cam'],
-                                                calib['R0_rect'],
-                                                calib['P2'],
-                                                (self.cfg.MODEL.PARAMS.INPUT_H, self.cfg.MODEL.PARAMS.INPUT_W))
-            bbox_2d = torch.tensor(result['bboxes2d'])
-            score = torch.tensor(result['scores'])
+        for i, result in enumerate(bb_out):
+            if self.cfg.MODEL.BACKBONE.PREDICTOR.NAME == "PointPillars":
+                # transform bboxes to correct format
+                calib = lidar['batched_calib_info'][i]
+                result = keep_bbox_from_image_range(result,
+                                                    calib['Tr_velo_to_cam'],
+                                                    calib['R0_rect'],
+                                                    calib['P2'],
+                                                    (self.cfg.MODEL.PARAMS.INPUT_H, self.cfg.MODEL.PARAMS.INPUT_W))
+                bbox_2d = torch.tensor(result['bboxes2d'])
+                score = torch.tensor(result['scores'])
+            else:
+                bbox_2d = bb_out[0]['boxes']
+                score = bb_out[0]['scores']
+
             boxes = bbox_2d[torch.where(score > self.bb_threshold)]
             
             id = i*torch.ones((boxes.shape[0]), dtype=torch.int).unsqueeze(-1)
+            if self.cfg.MODEL.BACKBONE.PREDICTOR.NAME == "FasterRCNN":
+                id.to(self.cfg.DEVICE)
+
             roi_list.append(torch.cat((id, boxes), dim=1))
+
             if self.cfg.USE_DEPTH_FEATURE:
                 depth_mask = self.create_depthmask(x_pts[i], result, calib)
                 depth_masks.append(depth_mask)
@@ -192,12 +215,10 @@ class BackbonePP(Module):
         rois = rois.to(self.cfg.DEVICE)
         bbs = rois[:,1:]
 
-        # get depth mask as extra input channel
-        #depth_masks = torch.tensor(self.create_depthmasks(x_pts, bbox_3d, calib))
-
         # resnet -- feature maps 
         feature_maps = {}
         if self.cfg.USE_DEPTH_FEATURE:
+            # get depth mask as extra input channel
             feature_maps[self.feature_names[0]] = self.res1(torch.cat((img, depth_masks.unsqueeze(0).to(device=self.cfg.DEVICE, dtype=torch.float32)), dim=1))
         else:
             feature_maps[self.feature_names[0]] = self.res1(img)

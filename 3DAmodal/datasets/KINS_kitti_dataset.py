@@ -3,6 +3,7 @@ from .KINS_dataset import KINS
 from .kitti import Kitti
 
 from tqdm import tqdm
+import os
 
 
 class AmodalLiDAR(Dataset):
@@ -26,7 +27,7 @@ class AmodalLiDAR(Dataset):
 
     def get_data_mapping(self):
         self.amodal_to_lidar_mapping = {}
-        with open(f"/home/jule-magnus/dd2414/3damodal/3DAmodal/datasets/amodal_to_lidar_mapping_{self.mode}.txt", 'r') as txtfile:
+        with open(f"{os.getcwd()}/datasets/amodal_to_lidar_mapping_{self.mode}.txt", 'r') as txtfile:
             data = txtfile.readlines()
         for line in data:
             amodal, lidar = line.split(",")

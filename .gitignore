@@ -4,7 +4,7 @@ detectron2/
 cocoapi/
 *.JPEG
 *.png
-runs/
+runs*/
 checkpoint*/
 testing.py
 # don't save slurm log files

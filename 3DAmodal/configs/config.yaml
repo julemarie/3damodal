@@ -1,12 +1,13 @@
 # Model stuff
 MODEL_NAME: 3DAmodalFormer
-MODEL_CLASS: model:3DAmodalForme
+MODEL_CLASS: model:3DAmodalFormer
 MODEL:
-    WEIGHTS: "../checkpoints/"
+    WEIGHTS: ../checkpoints/
     BACKBONE:
         BB_THRESHOLD: 0.7
         PREDICTOR:
-            WEIGHTS: '/home/jule-magnus/dd2414/merge_repo/3damodal/3DAmodal/model_checkpoints/pretrained_pointpillars_epoch_160.pth'
+            NAME: PointPillars # Options: PointPillars or FasterRCNN
+            WEIGHTS: /home/jule-magnus/dd2414/merge_repo/3damodal/3DAmodal/model_checkpoints/pretrained_pointpillars_epoch_160.pth
         FPN:
             IN_FEATURES: ['res1', 'res2', 'res3', 'res4']
             OUT_CHANNELS: 256
@@ -43,8 +44,8 @@ DATASET:
     TEST: /home/jule-magnus/dd2414/Data/ 
 BATCH_SIZE: 1
 OUTPUT_DIR:
-    TRAINING: "./outputs/training/"
-    TESTING: "./outputs/testing/"
+    TRAINING: ./outputs/training/
+    TESTING: ./outputs/testing/
 DEVICE: 'cuda'
 DISTRIBUTED:
     MODEL: False

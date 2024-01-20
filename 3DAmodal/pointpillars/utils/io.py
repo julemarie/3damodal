@@ -38,14 +38,14 @@ def read_calib(file_path, extend_matrix=True):
     with open(file_path, 'r') as f:
         lines = f.readlines()
     lines = [line.strip() for line in lines]
-    P0 = np.array([item for item in lines[0].split(' ')[1:]], dtype=np.float).reshape(3, 4)
-    P1 = np.array([item for item in lines[1].split(' ')[1:]], dtype=np.float).reshape(3, 4)
-    P2 = np.array([item for item in lines[2].split(' ')[1:]], dtype=np.float).reshape(3, 4)
-    P3 = np.array([item for item in lines[3].split(' ')[1:]], dtype=np.float).reshape(3, 4)
+    P0 = np.array([item for item in lines[0].split(' ')[1:]], dtype=np.float32).reshape(3, 4)
+    P1 = np.array([item for item in lines[1].split(' ')[1:]], dtype=np.float32).reshape(3, 4)
+    P2 = np.array([item for item in lines[2].split(' ')[1:]], dtype=np.float32).reshape(3, 4)
+    P3 = np.array([item for item in lines[3].split(' ')[1:]], dtype=np.float32).reshape(3, 4)
 
-    R0_rect = np.array([item for item in lines[4].split(' ')[1:]], dtype=np.float).reshape(3, 3)
-    Tr_velo_to_cam = np.array([item for item in lines[5].split(' ')[1:]], dtype=np.float).reshape(3, 4)
-    Tr_imu_to_velo = np.array([item for item in lines[6].split(' ')[1:]], dtype=np.float).reshape(3, 4)
+    R0_rect = np.array([item for item in lines[4].split(' ')[1:]], dtype=np.float32).reshape(3, 3)
+    Tr_velo_to_cam = np.array([item for item in lines[5].split(' ')[1:]], dtype=np.float32).reshape(3, 4)
+    Tr_imu_to_velo = np.array([item for item in lines[6].split(' ')[1:]], dtype=np.float32).reshape(3, 4)
 
     if extend_matrix:
         P0 = np.concatenate([P0, np.array([[0, 0, 0, 1]])], axis=0)

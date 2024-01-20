@@ -2,22 +2,29 @@
 MODEL_NAME: 3DAmodalFormer
 MODEL_CLASS: model:3DAmodalFormer
 MODEL:
-    WEIGHTS: "../checkpoints/"
-    BACKBONE: "fasterrcnn_resnet50_fpn" #hardcoded for now
+    WEIGHTS: ../checkpoints/
+    BACKBONE:
+        BB_THRESHOLD: 0.7
+        PREDICTOR:
+            NAME: PointPillars # Options: PointPillars or FasterRCNN
+            WEIGHTS: /home/jule-magnus/dd2414/merge_repo/3damodal/3DAmodal/model_checkpoints/pretrained_pointpillars_epoch_160.pth
+        FPN:
+            IN_FEATURES: ['res1', 'res2', 'res3', 'res4']
+            OUT_CHANNELS: 256
+        FEATURE_DIMS: [256, 512, 1024, 2048]
     PARAMS:
-        INPUT_H: 540
-        INPUT_W: 960
+        INPUT_H: 256 # 540
+        INPUT_W: 832 # 960
+        ORIG_H: 375
+        ORIG_W: 1242
         IN_CHANS : 3
-        ROI_OUT_SIZE: 32
+        ROI_OUT_SIZE: 14
         Q_DIM: 3
-        EMBED_DIM : 3
-        ENCODER_DEPTH : 1
-        ENCODER_HIDDEN_DIM : 1
-        ENCODER_NUM_HEADS : 3
-        DECODER_EMBED_DIM : 3
-        DECODER_DEPTH : 1
-        DECODER_HIDDEN_DIM : 1
-        DECODER_NUM_HEADS : 3
+        EMBED_DIM : 256
+        NUM_HEADS: 1
+        NUM_LAYERS: 1
+        NUM_OUTPUT_MASKS: 4
+    PATH: 
 # Training params
 OPTIMIZER: SGD # Hard coded rn
 OPTIMIZER_MOMENTUM:
@@ -25,23 +32,28 @@ OPTIMIZER_MOMENTUM:
     BETA2: 0.95
 WEIGHT_DECAY: 5.0e-2 
 BASE_LEARNING_RATE: 1.0e-3
-LEARNING_RATE: 2.5e-3
+LEARNING_RATE: 0.05
 MIN_LEARNING_RATE: 0.0
 LEARNING_RATE_SCHEDULER: cosine decay # Hard coded rn
-EPOCHS: 5
+EPOCHS: 2000
 CHECK_VAL_EVERY_N_EPOCH: 1
 RANDOM_SEED: 42
 DATASET: 
-    NAME: datasets.asd_dataset:AmodalSynthDriveDataset # datasets.KINS_dataset:KINS
-    TRAIN: /local_storage/users/tibbe/datasets/AmodalSynthDrive/train/ # /Midgard/Data/tibbe/datasets/KINS/
-    # /Midgard/Data/tibbe/datasets/AmodalSynthDrive/train
-    TEST: /local_storage/users/tibbe/datasets/AmodalSynthDrive/test/
+    NAME: datasets.KINS_dataset:KINS 
+    TRAIN: /home/jule-magnus/dd2414/Data/ 
+    TEST: /home/jule-magnus/dd2414/Data/ 
 BATCH_SIZE: 1
 OUTPUT_DIR:
-    TRAINING: "./outputs/training/"
-    TESTING: "./outputs/testing/"
-DEVICE: 'cpu'
-DISTRIBUTED: True
-    # ENABLE: True
-    # NUM_DEVICES: 4
+    TRAINING: ./outputs/training/
+    TESTING: ./outputs/testing/
+DEVICE: 'cuda'
+DISTRIBUTED:
+    MODEL: False
+    DATA: True
+USE_DEPTH_FEATURE: True # has to be false if backbone is not PointPillars/a 3D model
 SAVE_INTERVAL: 5
+START_FROM_CKPT: True
+CKPT_PATH: /home/jule-magnus/dd2414/merge_repo/3damodal/3DAmodal/checkpoints_orig/aisformer_r50_kins.pth 
+SAVE_CKPT_FOLDER: /home/jule-magnus/dd2414/merge_repo/3damodal/3DAmodal/checkpoints 
+RUNS_FOLDER: /home/jule-magnus/dd2414/merge_repo/3damodal/3DAmodal/runs_pp 
+LOG_LEVEL: INFO

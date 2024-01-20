@@ -1,8 +1,15 @@
 mmdetection/
 mmdetection3d/
+detectron2/
 cocoapi/
 *.JPEG
 *.png
+runs*/
+checkpoint*/
+testing.py
+# don't save slurm log files
+*.err
+*.out
 
 .vscode/
 

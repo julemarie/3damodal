@@ -129,12 +129,15 @@ class BackbonePP(Module):
             y_min, y_max = np.floor(np.min(y_img)).astype(np.int32), np.floor(np.max(y_img)).astype(np.int32)
 
             # upsample point cloud
-            X = np.linspace(x_min, x_max, num=x_max-x_min)
-            Y = np.linspace(y_min, y_max, num=y_max-y_min)
-            Y, X = np.meshgrid(Y, X)
-            interp = LinearNDInterpolator(list(zip(y_img, x_img)), z_normed)
-            Z = interp(Y, X)
-            Z = np.nan_to_num(Z, nan=0.0)
+            try:
+                X = np.linspace(x_min, x_max, num=x_max-x_min)
+                Y = np.linspace(y_min, y_max, num=y_max-y_min)
+                Y, X = np.meshgrid(Y, X)
+                interp = LinearNDInterpolator(list(zip(y_img, x_img)), z_normed)
+                Z = interp(Y, X)
+                Z = np.nan_to_num(Z, nan=0.0)
+            except:
+                continue
 
             if depth_mask[y_min:y_max, x_min:x_max].shape != Z.T.shape:
                 continue # workarount for edge cases that do not align, not sure why
@@ -157,7 +160,8 @@ class BackbonePP(Module):
         img = img.to(self.cfg.DEVICE)
         bbox_3d = self.bb_predictor(x_pts)
 
-        depth_masks = []
+        if self.cfg.USE_DEPTH_FEATURE:
+            depth_masks = []
         roi_list = []
         for i, result in enumerate(bbox_3d):
             # transform bboxes to correct format
@@ -173,10 +177,11 @@ class BackbonePP(Module):
             
             id = i*torch.ones((boxes.shape[0]), dtype=torch.int).unsqueeze(-1)
             roi_list.append(torch.cat((id, boxes), dim=1))
-
-            depth_mask = self.create_depthmask(x_pts[i], result, calib)
-            depth_masks.append(depth_mask)
-        depth_masks = torch.tensor(np.array(depth_masks))
+            if self.cfg.USE_DEPTH_FEATURE:
+                depth_mask = self.create_depthmask(x_pts[i], result, calib)
+                depth_masks.append(depth_mask)
+        if self.cfg.USE_DEPTH_FEATURE:
+            depth_masks = torch.tensor(np.array(depth_masks))
 
         
         # pred bbs: [xmin, ymin, xmax, ymax]
@@ -192,7 +197,10 @@ class BackbonePP(Module):
 
         # resnet -- feature maps 
         feature_maps = {}
-        feature_maps[self.feature_names[0]] = self.res1(torch.cat((img, depth_masks.unsqueeze(0).to(device=self.cfg.DEVICE, dtype=torch.float32)), dim=1))
+        if self.cfg.USE_DEPTH_FEATURE:
+            feature_maps[self.feature_names[0]] = self.res1(torch.cat((img, depth_masks.unsqueeze(0).to(device=self.cfg.DEVICE, dtype=torch.float32)), dim=1))
+        else:
+            feature_maps[self.feature_names[0]] = self.res1(img)
         feature_maps[self.feature_names[1]] = self.res2(feature_maps[self.feature_names[0]])
         feature_maps[self.feature_names[2]] = self.res3(feature_maps[self.feature_names[1]])
         feature_maps[self.feature_names[3]] = self.res4(feature_maps[self.feature_names[2]])

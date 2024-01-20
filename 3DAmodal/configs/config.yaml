@@ -49,6 +49,7 @@ DEVICE: 'cuda'
 DISTRIBUTED:
     MODEL: False
     DATA: True
+USE_DEPTH_FEATURE: True # has to be false if backbone is not PointPillars/a 3D model
 SAVE_INTERVAL: 5
 START_FROM_CKPT: True
 CKPT_PATH: /home/jule-magnus/dd2414/merge_repo/3damodal/3DAmodal/checkpoints_orig/aisformer_r50_kins.pth 

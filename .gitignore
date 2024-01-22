@@ -2,6 +2,7 @@ mmdetection/
 mmdetection3d/
 cocoapi/
 *.JPEG
+*compare*.png
 # *.png
 runs/
 checkpoint*/

@@ -84,9 +84,9 @@ def dice_bce_loss(pred, target, smooth=1):
 
 
 def test():
-    pred = torch.zeros((256, 256))
-    target0 = torch.zeros((128, 64))
-    target1 = torch.ones((128, 64))
+    pred = torch.zeros((28, 28))
+    target0 = torch.zeros((14, 7))
+    target1 = torch.ones((14, 7))
     target_top = torch.cat((target0, target0, target1, target1), dim=1)
     target_bottom = torch.cat((target0, target0, target0, target0), dim=1)
     target = torch.cat((target_top, target_bottom), dim=0)

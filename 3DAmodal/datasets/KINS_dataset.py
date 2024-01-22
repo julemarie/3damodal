@@ -13,8 +13,7 @@ class KINS(Dataset):
 
         self.root_dir = root_dir
         self.imgs_dir = os.path.join(self.root_dir, mode + "_imgs")
-        self.imgs_lst = os.listdir(self.imgs_dir)[99:100]
-
+        self.imgs_lst = os.listdir(self.imgs_dir)
 
         anns_dir = os.path.join(self.root_dir, "annotations")
         with open(os.path.join(anns_dir, "update2020_"+mode + ".json"), "r") as af:
@@ -23,6 +22,7 @@ class KINS(Dataset):
         if transform is None:
             self.transform = transforms.Compose([
                 transforms.ToTensor(),
+
                 transforms.Resize((256, 832)) # oriiginal size is (375, 1242)
             ])
         else:

@@ -133,7 +133,7 @@ def collate_fn_image_kins(list_data):
     return img_batch, anns_dict_list
 
 
-def get_dataloader(dataset, batch_size, partition="lidar", num_workers=0, shuffle=True, drop_last=False, distributed=False):
+def get_dataloader(dataset, batch_size, partition="lidar", num_workers=0, shuffle=False, drop_last=False, distributed=False):
     global NUM_DEVICES, GPU_ID
     
     if partition=="lidar":

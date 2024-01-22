@@ -1,8 +1,11 @@
-
 import fvcore.nn.weight_init as weight_init
 import torch
 from torch import nn
 from torch.nn import functional as F
+from torchvision import transforms
+
+import numpy as np
+import cv2
 
 from detectron2.layers import Conv2d, ConvTranspose2d, ShapeSpec, cat, get_norm
 from detectron2.utils.events import get_event_storage
@@ -43,10 +46,14 @@ orig_state_dict = torch.load("3DAmodal/checkpoint_orig/aisformer_r50_kins.pth", 
 
 
 class Backbone(nn.Module):
-    def __init__(self, cfg):
+    def __init__(self, cfg, orig_state_dict):
         super(Backbone, self).__init__()
 
         self.cfg = cfg
+
+        # mean and std of KINS from original AISFormer
+        self.pixel_mean = torch.tensor([103.53, 116.28, 123.675]).view(1, 3, 1, 1)
+        self.pixel_std = torch.tensor([1., 1., 1.]).view(1, 3, 1, 1)
 
         self.feature_names = self.cfg.MODEL.BACKBONE.FPN.IN_FEATURES
         self.fpn_out_channels = self.cfg.MODEL.BACKBONE.FPN.OUT_CHANNELS
@@ -58,6 +65,7 @@ class Backbone(nn.Module):
         resnet = resnet50(pretrained=True)
 
         self.res1 = nn.Sequential(*list(resnet.children())[:5])
+        # self.res1[0] = nn.Conv2d(4,64, kernel_size=(7,7), stride=(2,2), padding=(3,3), bias=False)
         self.res2 = nn.Sequential(*list(resnet.children())[5:6])
         self.res3 = nn.Sequential(*list(resnet.children())[6:7])
         self.res4 = nn.Sequential(*list(resnet.children())[7:8])
@@ -97,6 +105,8 @@ class Backbone(nn.Module):
         bbs_data = self.bb_predictor(img)
         bbs = bbs_data[0]['boxes'][torch.where(bbs_data[0]['scores'] > self.bb_threshold)]
 
+        img = img*255
+        img = (img - self.pixel_mean) / self.pixel_std
         feature_maps = {}
         feature_maps[self.feature_names[0]] = self.res1(img)
         feature_maps[self.feature_names[1]] = self.res2(feature_maps[self.feature_names[0]])
@@ -257,6 +267,83 @@ class AISFormer_orig(nn.Module):
         return vi_masks, bo_masks, a_masks, invisible_masks
     
 
+# --------------------------------------------------------------------------------------------- #
+def decode_mask_lst(polys, height, width):
+    mask = np.zeros((height, width), dtype=np.int32)
+    # mask = Image.new('L', (width, height), 0)
+    
+    for j ,poly in enumerate(polys):
+        poly = [[poly[i], poly[i+1]] for i in range(0, len(poly), 2)]
+        poly = np.array(poly, np.int32)
+        poly = poly.reshape((-1, 1, 2))
+        cv2.fillPoly(mask, [poly], color=(255, 255, 255), lineType=cv2.LINE_AA)
+
+    mask = torch.tensor(mask, dtype=torch.float).unsqueeze(0)
+    return mask
+
+    
+def __get_mask_kins2020(ann):
+    # 1) fetch necessary data from data and anns
+    h, w = ann['img_height'], ann['img_width']
+    mask_tf = transforms.Resize((256,832))
+    amodal_masks = []
+    inmodal_masks = []
+    bbs = []
+    all_amodal = torch.zeros((1, h, w))
+    all_inmodal = torch.zeros((1, h, w))
+    for key in ann.keys():
+        if key == "img_height" or key == "img_width":
+            continue
+        if ann[key]['a_segm'] != "":
+            amodal_mask = decode_mask_lst(ann[key]['a_segm'], h, w)
+            amodal_masks.append(amodal_mask)
+            all_amodal += amodal_mask
+        else:
+            amodal_masks.append(torch.zeros((1, h, w)))
+        if ann[key]['i_segm'] != "":
+            inmodal_mask = decode_mask_lst(ann[key]['i_segm'], h, w)
+            inmodal_masks.append(inmodal_mask)
+            all_inmodal += inmodal_mask
+        else:
+            inmodal_masks.append(torch.zeros((1, h, w)))
+        bbs.append(ann[key]['i_bbox'])
+    
+    amodal_masks = torch.stack(amodal_masks)
+    inmodal_masks = torch.stack(inmodal_masks)
+    amodal_masks = mask_tf(amodal_masks)
+    inmodal_masks = mask_tf(inmodal_masks)
+    
+    # for i in range(amodal_masks.shape[0]):
+    #     save_image(amodal_masks[i], "test_amod_{}.png".format(i))
+    #     save_image(inmodal_masks[i], "test_inmod_{}.png".format(i))
+    # combined_seg = torch.einsum('nchw->chw', seg_masks)
+    # combined_inmodal = torch.einsum('nchw->chw', inmodal_masks)
+
+    return inmodal_masks, amodal_masks, bbs
+
+def get_masks_kins2020(anns):
+    h, w = 256, 832
+    inmodal_masks_all = []
+    amodal_masks_all = []
+    bbs_all = []
+    for ann in anns:
+        inmodal_masks, amodal_masks, bbs = __get_mask_kins2020(ann)
+        bbs = torch.tensor(bbs)
+        bbs_all.append(bbs)
+        # min max normalize between 0 and 1
+        inmodal_masks = inmodal_masks.view(inmodal_masks.shape[0]*inmodal_masks.shape[1], -1)
+        inmodal_masks -= inmodal_masks.min(1, keepdim=True)[0]
+        inmodal_masks /= inmodal_masks.max(1, keepdim=True)[0]
+        inmodal_masks = inmodal_masks.view(inmodal_masks.shape[0], 1, h, w)
+        amodal_masks = amodal_masks.view(amodal_masks.shape[0]*amodal_masks.shape[1], -1)
+        amodal_masks -= amodal_masks.min(1, keepdim=True)[0]
+        amodal_masks /= amodal_masks.max(1, keepdim=True)[0]
+        amodal_masks = amodal_masks.view(amodal_masks.shape[0], 1, h, w)
+        # amodal_masks = (amodal_masks - amodal_masks.min()) / (amodal_masks.max() - amodal_masks.min())            
+        inmodal_masks_all.append(inmodal_masks)
+        amodal_masks_all.append(amodal_masks)
+
+    return inmodal_masks_all, amodal_masks_all, bbs_all
 
 def test():
     x = torch.randn(2, 256, 16, 16)
@@ -289,8 +376,15 @@ def test2():
     dataloader = get_dataloader(dataset, batch_size=1, num_workers=1, partition="image", distributed=False)
     img, anns = next(iter(dataloader))
 
+    gt_inmodal_masks, gt_amodal_masks, gt_bbs = get_masks_kins2020(anns)
+    gt_invis_masks = [a-i for a, i in zip(gt_amodal_masks, gt_inmodal_masks)]
+
+    # move gt masks to gpu
+    # gt_bbs: [xmin, ymin, diffx, diffy]
+    gt_bbs = [torch.div(b*2, 3, rounding_mode='floor').to('cpu') for b in gt_bbs] # resize bbs to match resized image
+
     devices = ['cpu', 'cpu']
-    backbone = Backbone(cfg)
+    backbone = Backbone(cfg, orig_state_dict)
     backbone.eval()
     aisformer = AISFormer_orig(devices, cfg)
     state_dict = torch.load("3DAmodal/checkpoint_orig/aisformer_r50_kins.pth", map_location='cpu')
@@ -307,6 +401,16 @@ def test2():
 
     final_features, bbs = backbone(img)
     vi_masks, bo_masks, a_masks, invisible_masks = aisformer(final_features)
+
+    vi_masks = torch.sigmoid(vi_masks)
+    bo_masks = torch.sigmoid(bo_masks)
+    a_masks = torch.sigmoid(a_masks)
+    invisible_masks = torch.sigmoid(invisible_masks)
+
+    save_image(gt_inmodal_masks[0], "gt_inmodal_masks.png")
+    save_image(gt_amodal_masks[0], "gt_amodal_masks.png")
+    save_image(gt_invis_masks[0], "gt_invis_masks.png")
+
     
     save_image(vi_masks[0], "vi_masks.png")
     save_image(bo_masks[0], "bo_masks.png")

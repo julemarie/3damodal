@@ -3,6 +3,7 @@ from aisformer import AISFormer
 from aisformer_w_backbone import AISFormer_orig, Backbone
 # from datasets.asd_dataset import AmodalSynthDriveDataset
 # from datasets.KINS_dataset import KINS
+import random
 import sys
 sys.path.append('/Midgard/home/tibbe/3damodal/3DAmodal/datasets')
 from dataloader import get_dataloader
@@ -66,7 +67,7 @@ def ddp_setup(rank, world_size):
     """
     # master is in charge of communication between the different processes
     os.environ['MASTER_ADDR'] = "localhost"
-    os.environ['MASTER_PORT'] = "12355"
+    os.environ['MASTER_PORT'] = "12357" #12355
 
     # nccl: nvidia collective communications library -> distr. communication across cuda gpus
     init_process_group(backend="nccl", rank=rank, world_size=world_size)
@@ -84,10 +85,7 @@ class Trainer():
         self.cfg = cfg
         self.in_shape = tuple((self.cfg.MODEL.PARAMS.INPUT_H, self.cfg.MODEL.PARAMS.INPUT_W))
 
-        self.save_interval = self.cfg.SAVE_INTERVAL
-
-        self.backbone = Backbone(self.cfg)
-        self.backbone.eval()
+        self.save_interval = self.cfg.SAVE_MODEL.INTERVAL
         
         # init model and move it to device
         log("BEFORE MODEL: {}".format(torch.cuda.memory_allocated(device)/1.074e+9))
@@ -115,6 +113,9 @@ class Trainer():
                         state_dict[key.replace("module.", "")] = state_dict.pop(key)
                 self.model.load_state_dict(state_dict)
             print("Loaded checkpoint from {}".format(self.cfg.CKPT_PATH))
+
+        self.backbone = Backbone(self.cfg, state_dict)
+        self.backbone.eval()
 
         if multi_gpu:
             if cfg.DISTRIBUTED.MODEL:
@@ -149,12 +150,6 @@ class Trainer():
 
         if isinstance(dataset, datasets.KINS_dataset.KINS):
             self.mask_tf = transforms.Resize(self.in_shape)
-
-        # self.viewstr2int = {"front_full": 0,
-        #                     "back_full": 1,
-        #                     "left_full": 2,
-        #                     "righ_full": 3,
-        #                     "bev_full": 4}
 
 
     def cosine_decay_lr(self, epoch, start_lr, end_lr, total_epochs):
@@ -212,13 +207,15 @@ class Trainer():
         pred_mask = pred_mask.view(-1)
         gt_mask = gt_mask.view(-1)
         
-        # compute dice loss
-        intersection = (pred_mask * gt_mask).sum()
-        dice_loss = 1 - (2.*intersection + smooth) / (pred_mask.sum() + gt_mask.sum() + smooth)
-        # compute binary cross entropy loss
-        BCE = torch.nn.functional.binary_cross_entropy(pred_mask, gt_mask, reduction='mean')
-        # compute dice + BCE loss
-        loss = BCE + dice_loss
+        # # compute dice loss
+        # intersection = (pred_mask * gt_mask).sum()
+        # dice_loss = 1 - (2.*intersection + smooth) / (pred_mask.sum() + gt_mask.sum() + smooth)
+        # # compute binary cross entropy loss
+        # BCE = torch.nn.functional.binary_cross_entropy(pred_mask, gt_mask, reduction='mean')
+        # # compute dice + BCE loss
+        # loss = BCE + dice_loss
+
+        loss = torch.nn.functional.binary_cross_entropy_with_logits(pred_mask, gt_mask)
 
         # compute binnary cross entropy loss
         # loss = torch.nn.functional.binary_cross_entropy(pred_mask, gt_mask)
@@ -310,13 +307,17 @@ class Trainer():
             if key == "img_height" or key == "img_width":
                 continue
             if ann[key]['a_segm'] != "":
-                amodal_mask = self.decode_mask_lst(ann[key]['a_segm'], h, w)
+                amodal_mask = self.decode_mask_lst(ann[key]['a_segm'], h, w)/255
+                amodal_mask=amodal_mask.to(dtype=torch.bool)
+                amodal_mask=amodal_mask.to(dtype=torch.float)
                 amodal_masks.append(amodal_mask)
                 all_amodal += amodal_mask
             else:
                 amodal_masks.append(torch.zeros((1, h, w)))
             if ann[key]['i_segm'] != "":
-                inmodal_mask = self.decode_mask_lst(ann[key]['i_segm'], h, w)
+                inmodal_mask = self.decode_mask_lst(ann[key]['i_segm'], h, w)/255
+                inmodal_mask=inmodal_mask.to(dtype=torch.bool)
+                inmodal_mask=inmodal_mask.to(dtype=torch.float)
                 inmodal_masks.append(inmodal_mask)
                 all_inmodal += inmodal_mask
             else:
@@ -345,14 +346,14 @@ class Trainer():
             bbs = torch.tensor(bbs)
             bbs_all.append(bbs)
             # min max normalize between 0 and 1
-            inmodal_masks = inmodal_masks.view(inmodal_masks.shape[0]*inmodal_masks.shape[1], -1)
-            inmodal_masks -= inmodal_masks.min(1, keepdim=True)[0]
-            inmodal_masks /= inmodal_masks.max(1, keepdim=True)[0]
-            inmodal_masks = inmodal_masks.view(inmodal_masks.shape[0], 1, self.in_shape[0], self.in_shape[1])
-            amodal_masks = amodal_masks.view(amodal_masks.shape[0]*amodal_masks.shape[1], -1)
-            amodal_masks -= amodal_masks.min(1, keepdim=True)[0]
-            amodal_masks /= amodal_masks.max(1, keepdim=True)[0]
-            amodal_masks = amodal_masks.view(amodal_masks.shape[0], 1, self.in_shape[0], self.in_shape[1])
+            # inmodal_masks = inmodal_masks.view(inmodal_masks.shape[0]*inmodal_masks.shape[1], -1)
+            # inmodal_masks -= inmodal_masks.min(1, keepdim=True)[0]
+            # inmodal_masks /= inmodal_masks.max(1, keepdim=True)[0]
+            # inmodal_masks = inmodal_masks.view(inmodal_masks.shape[0], 1, self.in_shape[0], self.in_shape[1])
+            # amodal_masks = amodal_masks.view(amodal_masks.shape[0]*amodal_masks.shape[1], -1)
+            # amodal_masks -= amodal_masks.min(1, keepdim=True)[0]
+            # amodal_masks /= amodal_masks.max(1, keepdim=True)[0]
+            # amodal_masks = amodal_masks.view(amodal_masks.shape[0], 1, self.in_shape[0], self.in_shape[1])
             # amodal_masks = (amodal_masks - amodal_masks.min()) / (amodal_masks.max() - amodal_masks.min())            
             inmodal_masks_all.append(inmodal_masks)
             amodal_masks_all.append(amodal_masks)
@@ -465,12 +466,12 @@ class Trainer():
         loss = 0
         for i, j in assignment.items():
             if j == 'fp': # if false positive
-                zero_mask = torch.zeros((pred_masks[i].shape), device=self.devices[1])
+                zero_mask = torch.zeros((pred_masks[i].shape), device=self.devices[1], dtype=torch.float)
                 loss += self.compute_loss(pred_masks[i], zero_mask)
             else:
                 gt_mask = self.crop_and_resize_mask(gt_masks[j,0], bbs[i])
                 compare = torch.cat((pred_masks[i], gt_mask), dim=0).unsqueeze(0)
-                # save_image(compare, "test_compare_{}.png".format(type))
+                save_image(compare, "test_compare_{}.png".format(type))
                 loss += self.compute_loss(pred_masks[i], gt_mask)
         return loss
     
@@ -489,69 +490,6 @@ class Trainer():
             loss += self.compute_loss(pred_masks[i], gt_mask)
 
         return loss
-
-    def train(self):
-        print("Starting training on GPU:{}...".format(self.gpu_id))
-        print(torch.cuda.current_device())
-        # clear gpu memory
-        # torch.cuda.empty_cache()
-        for epoch_idx in tqdm(range(self.epochs)):
-            # for data, anns in self.dataloader:
-            for img_batch, anns in self.dataloader:
-                print("Loaded se data")
-                # 1) Extract masks from annotations
-                gt_vis_masks, gt_amod_masks, gt_occl_masks, gt_invis_masks = anns[0]['visible'], anns[0]['amodal'], anns[0]['occluder'], anns[0]['invisible']
-                gt_vis_masks = gt_vis_masks.to(self.gpu_id)
-                gt_amod_masks = gt_amod_masks.to(self.gpu_id)
-                gt_occl_masks = gt_occl_masks.to(self.gpu_id)
-                gt_invis_masks = gt_invis_masks.to(self.gpu_id)
-                # img_batch size: [B, 5, 3, 540, 960]
-                img_batch = img_batch[:,:4] # we don't care about the BEV image here
-                B, V, C, H, W = img_batch.shape
-                print(img_batch.shape)
-                img_batch = img_batch.reshape((B*V, C, H, W))
-                img_batch = img_batch.to(self.gpu_id)
-                
-                # 2) pass images through model (output will be the four masks)
-                masks, rois = self.model(img_batch) # [K, 4, 64, 64], [K, 5]
-                # torch.cuda.empty_cache()
-                rois = rois.to(torch.int).to('cpu')
-                K, num_masks, H_m, W_m = masks.shape
-                m_o = masks[:, 0]
-                m_v = masks[:, 1]
-                m_a = masks[:, 2]
-                m_i = masks[:, 3]
-                
-                # 3) calculate the loss
-                # 3.1) assign predicted masks to gt masks using IOU matrix and Hungarian algorithm
-                # for occluder masks:
-                assigned_masks_o = self.assign_iou(m_o, gt_occl_masks, bbs=rois)
-                assigned_masks_a = self.assign_iou(m_a, gt_amod_masks, bbs=rois)
-                assigned_masks_i = self.assign_iou(m_i, gt_invis_masks, bbs=rois)
-
-                # 3.2) calculate the losses
-                loss_o = self.compute_losses(assigned_masks_o, m_o, gt_occl_masks, bbs=rois)
-                loss_a = self.compute_losses(assigned_masks_a, m_a, gt_amod_masks, bbs=rois)
-                loss_i = self.compute_losses(assigned_masks_i, m_i, gt_invis_masks, bbs=rois)
-                loss_v = self.compute_loss_vis(m_v, gt_vis_masks, rois)
-                
-                # 3.3) accumulate the losses
-                total_loss = loss_o + loss_a + loss_i + loss_v
-
-                # torch.cuda.empty_cache()
-
-                # 4) update the weights (for this we need to define an optimizer -> check paper)
-                self.optimizer.zero_grad()
-                print("BACKWARD")
-                total_loss.backward()
-                print("BACHWARD DONE")
-                self.optimizer.step()
-
-                # torch.cuda.empty_cache()
-
-                # 5) start training and save masks, feature tensors, and attention maps for visualisation (check paper what they used)
-
-            print("Loss after epoch {}: {}".format(epoch_idx, total_loss))
     
     def normalize(self, x):
         """
@@ -571,6 +509,8 @@ class Trainer():
 
     
     def train_kins(self):
+        self.backbone.train()
+        self.backbone.bb_predictor.eval()
         self.model.train()
         print("Starting training on GPU:{}...".format(self.devices))
         # print(torch.cuda.current_device())
@@ -650,6 +590,10 @@ class Trainer():
                 # masks = self.model(f_roi) # [K, 4, 56, 56], [K, 5]
                 log("BEFORE FW: {}".format(torch.cuda.memory_allocated(self.devices[0])/1.074e+9))
                 m_v, m_o, m_a, m_i = self.model(features) # [K, 1, 56, 56], [K, 1, 56, 56], [K, 1, 56, 56], [K, 1, 56, 56]
+                # m_v = torch.sigmoid(m_v)
+                # m_o = torch.sigmoid(m_o)
+                # m_a = torch.sigmoid(m_a)
+                # m_i = torch.sigmoid(m_i)
                 log("AFTER FW: {}".format(torch.cuda.memory_allocated(self.devices[0])/1.074e+9))
                 m_v = m_v.squeeze(1)
                 m_o = m_o.squeeze(1)
@@ -657,10 +601,10 @@ class Trainer():
                 m_i = m_i.squeeze(1)
 
                 # min max normalize between 0 and 1
-                m_v = self.normalize(m_v)
-                m_o = self.normalize(m_o)
-                m_a = self.normalize(m_a)
-                m_i = self.normalize(m_i)
+                # m_v = self.normalize(m_v)
+                # m_o = self.normalize(m_o)
+                # m_a = self.normalize(m_a)
+                # m_i = self.normalize(m_i)
                 # if masks is None:
                 #     print("No masks")
                 #     continue
@@ -724,24 +668,25 @@ class Trainer():
             # save_image(m_i[0], "test_i_{}.png".format(epoch_idx))
             # save_image(m_o[0], "test_o_{}.png".format(epoch_idx))
             # print(gt_invis_masks[0][assigned_masks_i[0]][None,None].shape)
+            random_idx = random.randint(0, m_a.shape[0]-1)
             if self.writer is not None:
                 pseudo_mask_o = torch.zeros_like(m_o[0][None])
-                if assigned_masks_a[0] != 'fp':
-                    gt_mask_a = self.crop_and_resize_mask(gt_amodal_masks[0][assigned_masks_a[0]].squeeze(0), rois[0])[None]
+                if assigned_masks_a[random_idx] != 'fp':
+                    gt_mask_a = self.crop_and_resize_mask(gt_amodal_masks[0][assigned_masks_a[random_idx]].squeeze(0), rois[random_idx])[None]
                 else:
                     gt_mask_a = pseudo_mask_o
-                if assigned_masks_v[0] != 'fp':
-                    gt_mask_v = self.crop_and_resize_mask(gt_inmodal_masks[0][assigned_masks_v[0]].squeeze(0), rois[0])[None]
+                if assigned_masks_v[random_idx] != 'fp':
+                    gt_mask_v = self.crop_and_resize_mask(gt_inmodal_masks[0][assigned_masks_v[random_idx]].squeeze(0), rois[random_idx])[None]
                 else:
                     gt_mask_v = pseudo_mask_o
-                if assigned_masks_i[0] != 'fp':
-                    gt_mask_i = self.crop_and_resize_mask(gt_invis_masks[0][assigned_masks_i[0]].squeeze(0), rois[0])[None]
+                if assigned_masks_i[random_idx] != 'fp':
+                    gt_mask_i = self.crop_and_resize_mask(gt_invis_masks[0][assigned_masks_i[random_idx]].squeeze(0), rois[random_idx])[None]
                 else:
                     gt_mask_i = pseudo_mask_o
                 gt_masks = torch.stack((gt_mask_v, gt_mask_a, gt_mask_i, pseudo_mask_o), dim=0)
                 # gt_masks = torch.cat((gt_inmodal_masks[0][assigned_masks_v[0]][None,None], gt_amodal_masks[0][assigned_masks_a[0]][None,None], gt_invis_masks[0][assigned_masks_i[0]][None,None], torch.zeros_like(gt_invis_masks[0][assigned_masks_i[0]][None,None])), dim=0)
                 # print(gt_masks.shape)
-                masks = torch.cat((m_v[0][None,None], m_a[0][None,None], m_i[0][None,None], m_o[0][None,None]), dim=0)
+                masks = torch.cat((m_v[random_idx][None,None], m_a[random_idx][None,None], m_i[random_idx][None,None], m_o[random_idx][None,None]), dim=0)
 
                 all_masks = torch.cat((gt_masks, masks), dim=2)
                 self.writer.add_images("masks [v, a, i, o(no gt)]", all_masks, (epoch_idx+1)*len(self.dataloader), dataformats="NCHW")
@@ -761,6 +706,8 @@ class Trainer():
 
             if self.devices[0] == 0 or self.devices[0] == 'cpu': # only save model on gpu 0
                 if epoch_idx % self.save_interval == 0 or epoch_idx == self.epochs-1:
+                    if self.cfg.SAVE_MODEL.FULL:
+                        torch.save(self.backbone.state_dict(), "{}/backbone_{}.pth".format(CKP_FOLDER, epoch_idx))
                     if self.cfg.DISTRIBUTED.MODEL:
                         torch.save(self.model.module.state_dict(), "{}/aisformer_{}.pth".format(CKP_FOLDER, epoch_idx))
                     else:
@@ -769,6 +716,7 @@ class Trainer():
         
     def test_kins(self):
         self.model.eval()
+        self.backbone.eval()
 
         TP = 0
         FP = 0
@@ -787,40 +735,19 @@ class Trainer():
             gt_amodal_masks = [m.to(out_dev) for m in gt_amodal_masks]
             gt_invis_masks = [m.to(out_dev) for m in gt_invis_masks]
 
-            thresh = 0.9
-            x = self.backbone(img_batch)
-            roi_list = []
-            for i, ann in enumerate(x):
-                boxes = ann["boxes"][torch.where(ann["scores"] > thresh)]
-                id = i*torch.ones((boxes.shape[0]), dtype=torch.int, device='cpu').unsqueeze(-1)
-                roi_list.append(torch.cat((id, boxes), dim=1))
+            features, rois = self.backbone(img_batch)
+            rois = torch.cat((torch.zeros((rois.shape[0], 1), dtype=torch.float), rois), dim=1)
+            rois = rois.to(torch.int).to('cpu')
 
-            if roi_list:
-                # pred bbs: [xmin, ymin, xmax, ymax]
-                rois = torch.cat(roi_list, dim=0) # [K, 5] K: #bboxes, 5: first for img id and last four for corners
-            else:
+            if features.shape[0] == 0:
                 continue
             
-            feats = img_batch
-            for l in self.feat_encoder:
-                feats = l(feats)
+            m_v, m_o, m_a, m_i = self.model(features)
 
-            f_roi = roi_align(feats, rois, output_size=(self.cfg.MODEL.PARAMS.ROI_OUT_SIZE, self.cfg.MODEL.PARAMS.ROI_OUT_SIZE), spatial_scale=0.25, sampling_ratio=-1,aligned=True) # [K, C, H_r, W_r]
-            if f_roi.shape[0] == 0:
-                continue
-            
-            m_v, m_o, m_a, m_i = self.model(f_roi) # [K, 1, 56, 56], [K, 1, 56, 56], [K, 1, 56, 56], [K, 1, 56, 56]
-            
-            m_v = m_v.squeeze(1)
-            m_o = m_o.squeeze(1)
-            m_a = m_a.squeeze(1)
-            m_i = m_i.squeeze(1)
-
-            # min max normalize between 0 and 1
-            m_v = self.normalize(m_v)
-            m_o = self.normalize(m_o)
-            m_a = self.normalize(m_a)
-            m_i = self.normalize(m_i)
+            m_v = torch.sigmoid(m_v).squeeze(1)
+            m_o = torch.sigmoid(m_o).squeeze(1)
+            m_a = torch.sigmoid(m_a).squeeze(1)
+            m_i = torch.sigmoid(m_i).squeeze(1)            
 
             iou_matrix = self.calculate_IOU_matrix(m_a, gt_amodal_masks[0], pred_bbs=None, gt_bbs=None)
             iou_threshold = 0.5
@@ -868,7 +795,7 @@ def main(rank: int, world_size: int, cfg: OmegaConf):
     LOG_LEVEL = cfg.LOG_LEVEL
 
     RUNS_FOLDER = cfg.RUNS_FOLDER
-    CKP_FOLDER = cfg.SAVE_CKPT_FOLDER
+    CKP_FOLDER = cfg.SAVE_MODEL.PATH
 
     if not os.path.exists(RUNS_FOLDER):
         os.mkdir(RUNS_FOLDER)

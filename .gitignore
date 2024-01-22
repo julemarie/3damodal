@@ -3,7 +3,7 @@ mmdetection3d/
 detectron2/
 cocoapi/
 *.JPEG
-*.png
+*compare*.png
 runs*/
 checkpoint*/
 testing.py

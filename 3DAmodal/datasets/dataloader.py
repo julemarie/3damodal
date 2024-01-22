@@ -211,13 +211,3 @@ def get_dataloader(dataset, batch_size, partition="lidar", num_workers=0, shuffl
             collate_fn=collate,
         )
     return dataloader
-
-
-if __name__ == "__main__":
-    kins_dataset = KINS()
-    dl = get_dataloader(kins_dataset, batch_size=1, partition="image")
-
-    for X, Y in dl:
-        print(X.shape)
-        print(Y)
-        break

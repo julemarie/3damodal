@@ -19,8 +19,7 @@ The pipeline is visualized in the figure below.
 - Source code is included in the 3DAmodal subfolder
 - Documentation is available in the docu subfolder
 - For information on setup and training see [SETUP](docu/SETUP.md)
-- For information on the theoretical background see [BACKGROUND](docu/BACKGROUND.md)
-- For more information on our implementation and results see [CONCEPT](docu/CONCEPT.md)
+- For more information on our background, implementation and results see [CONCEPT](docu/CONCEPT.md)
 
 ## Sources
 We use parts of and extend existing code bases in our repository.

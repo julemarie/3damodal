@@ -34,17 +34,6 @@ import matplotlib.pyplot as plt
 class AISFormer(nn.Module):
     def __init__(self, devices, cfg):
         super(AISFormer, self).__init__()
-        # fmt: off
-        # num_classes       = cfg.MODEL.ROI_HEADS.NUM_CLASSES
-        # conv_dims         = cfg.MODEL.ROI_MASK_HEAD.CONV_DIM
-        # self.norm         = cfg.MODEL.ROI_MASK_HEAD.NORM
-        # num_conv          = cfg.MODEL.ROI_MASK_HEAD.NUM_CONV
-        # input_channels    = input_shape.channels
-        # cls_agnostic_mask = cfg.MODEL.ROI_MASK_HEAD.CLS_AGNOSTIC_MASK
-        # num_mask_classes = 1 if cls_agnostic_mask else num_classes
-        # self.num_mask_classes = num_mask_classes
-        # self.aisformer = cfg.MODEL.AISFormer
-        # fmt: on
         self.cfg = cfg
         self.log_level = cfg.LOG_LEVEL
 
@@ -68,12 +57,6 @@ class AISFormer(nn.Module):
         # feature map fcn
         self.mask_feat_learner_TR = Conv2d(conv_dims, conv_dims, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), activation=nn.ReLU()).to(device=self.devs[0])
         weight_init.c2_msra_fill(self.mask_feat_learner_TR)
-
-        # mask predictor
-        # self.predictor_TR = Conv2d(1, num_mask_classes, kernel_size=1, stride=1, padding=0)
-        # nn.init.normal_(self.predictor_TR.weight, std=0.001)
-        # if self.predictor_TR.bias is not None:
-        #     nn.init.constant_(self.predictor_TR.bias, 0)
 
         # pixel embedding
         self.pixel_embed = nn.Conv2d(conv_dims, conv_dims, kernel_size=(1, 1), stride=(1, 1)).to(device=self.devs[1])
@@ -114,10 +97,6 @@ class AISFormer(nn.Module):
 
     def forward(self, x):
         bs, emb_dim, spat_size, spat_size = x.shape
-        # x_ori = x.clone()
-        # bs = x_ori.shape[0]
-        # emb_dim = x_ori.shape[1]
-        # spat_size = x_ori.shape[-1]
 
         x = x.to(device=self.devs[0])
         self.log("AFTER FEAT: {}".format(torch.cuda.memory_allocated(self.devs[0])/1.074e+9))
@@ -171,33 +150,5 @@ class AISFormer(nn.Module):
         bo_masks        = outputs_mask[:,1,:,:].unsqueeze(1) #occluder mask
         a_masks         = outputs_mask[:,2,:,:].unsqueeze(1) #amodal mask
         invisible_masks = outputs_mask[:,-1,:,:].unsqueeze(1) #invisible mask
-        # dump_tensor = torch.zeros_like(vi_masks).to(device='cuda')
 
         return vi_masks, bo_masks, a_masks, invisible_masks
-    
-
-
-def test():
-    x = torch.randn(2, 256, 16, 16)
-    cfg = OmegaConf.load("3DAmodal/configs/config.yaml")
-    devices = ['cpu', 'cpu']
-    model = AISFormer(devices, cfg)
-    model_state_dict = model.state_dict()
-    state_dict = torch.load("3DAmodal/aisformer_r50_kins.pth", map_location='cpu')
-    new_state_dict = OrderedDict()
-    
-    for key in state_dict['model'].keys():
-        if "mask_head_model" in key:
-            if "predictor" not in key:
-                new_state_dict[key.replace("roi_heads.mask_head.mask_head_model.", "")] = state_dict['model'][key]
-    # model.to(device='cuda')
-    model.load_state_dict(new_state_dict)
-    print("inference")
-    vi_masks, bo_masks, a_masks, invisible_masks = model(x)
-    print(vi_masks.shape)
-    print(bo_masks.shape)
-    print(a_masks.shape)
-    print(invisible_masks.shape)
-
-if __name__ == "__main__":
-    test()

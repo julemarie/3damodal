@@ -12,7 +12,7 @@ The features and ROI align are then used as input to the AISFormer model, which 
 
 The pipeline is visualized in the figure below.
 
-![Visualisation of our model's pipeline](img/3damodalstructure.png "Visualisation of our model's pipeline")
+![Visualisation of our model's pipeline](docu/img/3damodalstructure.png "Visualisation of our model's pipeline")
 
 ## Repository structure and documentation
 
